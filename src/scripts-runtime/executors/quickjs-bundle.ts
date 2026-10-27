@@ -38,6 +38,91 @@ export type QuickJSBundle =
 type BuildConfigWithFiles = Parameters<typeof Bun.build>[0] & { files: Record<string, string> };
 
 const zodEntryCache = new Map<string, string | null>();
+const zodSourceCache = new Map<string, string>();
+
+async function readCachedZodSource(filePath: string): Promise<string> {
+  const cached = zodSourceCache.get(filePath);
+  if (cached !== undefined) return cached;
+  const text = await Bun.file(filePath).text();
+  zodSourceCache.set(filePath, text);
+  return text;
+}
+
+/**
+ * Extracts identifiers referenced by user script source so classic `zod` can
+ * shed unused format classes, combinators, codecs, and JSON Schema generators
+ * before `Bun.build` runs dead-code elimination.
+ */
+function collectUsedIdentifiers(source: string): ReadonlySet<string> {
+  const set = new Set(source.match(/[A-Za-z_$][A-Za-z0-9_$]*/g) ?? []);
+  // Every swarm script contains `export default`, so only keep the `default`
+  // schema builder when `.default` or `_default` is referenced.
+  if (!/(?:\.\s*default\b|\b_default\b|["']default["'])/.test(source)) {
+    set.delete("default");
+  }
+  return set;
+}
+
+function pruneClassicZodExternal(text: string, used: ReadonlySet<string>): string {
+  let out = text;
+  if (!used.has("locales")) {
+    out = out.replace(/^\s*export \* as locales from "\.\.\/locales\/index\.js";\s*$/gm, "");
+  }
+  if (!used.has("fromJSONSchema")) {
+    out = out.replace(/^\s*export \{ fromJSONSchema \} from "\.\/from-json-schema\.js";\s*$/gm, "");
+  }
+  if (!used.has("toJSONSchema")) {
+    out = out.replace(
+      /^\s*export \{ toJSONSchema \} from "\.\.\/core\/json-schema-processors\.js";\s*$/gm,
+      "",
+    );
+  }
+  return out;
+}
+
+function pruneClassicZodSchemas(text: string, used: ReadonlySet<string>): string {
+  let out = text;
+  if (!used.has("toJSONSchema") && !used.has("jsonSchema")) {
+    out = out.replace(
+      /Object\.assign\(inst\["~standard"\],\s*\{\s*jsonSchema:\s*\{[\s\S]*?\},\s*\}\);\s*inst\.toJSONSchema\s*=\s*createToJSONSchemaMethod\(inst,\s*\{\}\);/,
+      "",
+    );
+    out = out.replace(/^\s*inst\._zod\.processJSONSchema\s*=[^;]+;\s*$/gm, "");
+  }
+  // Use $ZodObject instead of $ZodObjectJIT inside QuickJS: single-shot
+  // argsSchema.parse runs do not benefit from dynamic `new Function` codegen.
+  out = out.replace(
+    "core.$ZodObjectJIT.init(inst, def);",
+    () => "core.$ZodObject.init(inst, def);",
+  );
+  if (!used.has("spa")) {
+    out = out.replace(/^\s*inst\.spa\s*=\s*inst\.safeParseAsync;\s*$/gm, "");
+  }
+  out = out.replace(
+    /^\s*inst\.(safeParse|parseAsync|safeParseAsync|encode|decode|encodeAsync|decodeAsync|safeEncode|safeDecode|safeEncodeAsync|safeDecodeAsync)\s*=\s*(?:async\s*)?\([^;]+;\s*$/gm,
+    (line, method: string) => {
+      if (method === "safeParse" && (used.has("isOptional") || used.has("isNullable"))) {
+        return line;
+      }
+      if (method === "safeParseAsync" && used.has("spa")) {
+        return line;
+      }
+      return used.has(method) ? line : "";
+    },
+  );
+  out = out.replace(
+    /^\s*inst\.([a-zA-Z0-9_]+)\s*=\s*\((?:params|\.\.\.args)?\)\s*=>\s*inst\.check\([^;]+\);\s*$/gm,
+    (line, method: string) => (used.has(method) ? line : ""),
+  );
+  out = out.replace(
+    /^\s{8}([a-zA-Z0-9_]+)\([^)]*\)\s*\{\s*\n(?:\s{12}.*\n)*?\s{8}\},\n/gm,
+    (block, method: string) => {
+      if (method === "check" || method === "with" || method === "clone") return block;
+      return used.has(method) ? block : "";
+    },
+  );
+  return out;
+}
 
 /**
  * Prefer zod's real ESM sources, which tree-shake well. The prebuilt
@@ -94,6 +179,7 @@ export async function bundleForQuickJS(source: string): Promise<QuickJSBundle> {
     return cached;
   }
 
+  const usedIdentifiers = /\bzod\b/.test(source) ? collectUsedIdentifiers(source) : null;
   let result: Awaited<ReturnType<typeof Bun.build>>;
   try {
     result = await Bun.build({
@@ -130,6 +216,22 @@ export async function bundleForQuickJS(source: string): Promise<QuickJSBundle> {
               }
               return { path: zodEntry };
             });
+            if (usedIdentifiers) {
+              build.onLoad({ filter: /v4[\\/]classic[\\/]external\.js$/ }, async (args) => ({
+                contents: pruneClassicZodExternal(
+                  await readCachedZodSource(args.path),
+                  usedIdentifiers,
+                ),
+                loader: "js",
+              }));
+              build.onLoad({ filter: /v4[\\/]classic[\\/]schemas\.js$/ }, async (args) => ({
+                contents: pruneClassicZodSchemas(
+                  await readCachedZodSource(args.path),
+                  usedIdentifiers,
+                ),
+                loader: "js",
+              }));
+            }
           },
         },
       ],
