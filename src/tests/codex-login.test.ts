@@ -438,4 +438,49 @@ describe("runCodexLogin", () => {
     );
     expect(exit).not.toHaveBeenCalled();
   });
+
+  it("warns when auto-picking a new slot for an account that already occupies a slot (#1551)", async () => {
+    const logs: string[] = [];
+
+    await runCodexLogin([], {
+      resolveConfig: async () => ({
+        apiUrl: "http://localhost:3013",
+        apiKey: "example-test-key",
+        slot: undefined,
+      }),
+      login: mock(async () => ({
+        access: "at_dup",
+        refresh: "rt_dup",
+        expires: Date.now() + 3600000,
+        accountId: "acc-dup-12345",
+      })),
+      store: mock(async () => {}),
+      loadAllSlots: mock(async () => [
+        {
+          slot: 0,
+          creds: {
+            access: "at_existing",
+            refresh: "rt_existing",
+            expires: Date.now() + 3600000,
+            accountId: "acc-dup-12345",
+          },
+        },
+      ]),
+      clearAuthBench: mock(async () => false),
+      readAuthFence: mock(async () => 0),
+      log: (msg: string) => {
+        logs.push(msg);
+      },
+      error: () => {},
+      exit: () => {},
+    });
+
+    expect(
+      logs.some(
+        (m) =>
+          m.includes("Warning: account acc-dup-12345 already occupies slot(s) 0") &&
+          m.includes("--slot 0"),
+      ),
+    ).toBe(true);
+  });
 });

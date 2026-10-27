@@ -274,6 +274,7 @@ export async function runCodexLogin(args: string[], deps: RunCodexLoginDeps = {}
 
     // Resolve target slot: explicit --slot N, or auto-pick next free.
     let slot: number;
+    let existingSlots: Awaited<ReturnType<typeof loadAllSlots>> = [];
     if (parsedSlot !== undefined) {
       if (!Number.isInteger(parsedSlot) || parsedSlot < 0 || parsedSlot > MAX_CODEX_OAUTH_SLOT) {
         error(`\nError: --slot must be an integer between 0 and ${MAX_CODEX_OAUTH_SLOT}`);
@@ -282,7 +283,8 @@ export async function runCodexLogin(args: string[], deps: RunCodexLoginDeps = {}
       }
       slot = parsedSlot;
     } else {
-      const occupied = new Set((await loadAllSlots(apiUrl, apiKey)).map((s) => s.slot));
+      existingSlots = await loadAllSlots(apiUrl, apiKey);
+      const occupied = new Set(existingSlots.map((s) => s.slot));
       let next = 0;
       while (occupied.has(next) && next <= MAX_CODEX_OAUTH_SLOT) next++;
       if (next > MAX_CODEX_OAUTH_SLOT) {
@@ -337,6 +339,23 @@ export async function runCodexLogin(args: string[], deps: RunCodexLoginDeps = {}
     // Read the auth-failure fence before the credential write (see clearCodexAuthBench).
     const authFence = await readAuthFence(apiUrl, apiKey).catch((err: unknown) => err);
 
+    const keySuffix = deriveCodexKeySuffix(creds.access, creds.accountId);
+    const duplicateSlots = existingSlots
+      .filter(
+        (s) =>
+          s.slot !== slot &&
+          ((Boolean(creds.accountId) && s.creds.accountId === creds.accountId) ||
+            (Boolean(s.creds.access) &&
+              deriveCodexKeySuffix(s.creds.access, s.creds.accountId) === keySuffix)),
+      )
+      .map((s) => s.slot);
+    if (duplicateSlots.length > 0) {
+      log(
+        `Warning: account ${creds.accountId} already occupies slot(s) ${duplicateSlots.join(", ")}. ` +
+          `Re-run with --slot ${duplicateSlots[0]} to replace an existing slot instead of adding a duplicate.`,
+      );
+    }
+
     // Store credentials in the swarm API config store
     log("\nStoring credentials in swarm API config store...");
     await store(apiUrl, apiKey, creds, slot);
@@ -344,7 +363,6 @@ export async function runCodexLogin(args: string[], deps: RunCodexLoginDeps = {}
 
     // A re-login returns an auth-benched slot to the pool right away.
     // Non-fatal: the credentials are stored; a later re-login also lifts it.
-    const keySuffix = deriveCodexKeySuffix(creds.access, creds.accountId);
     try {
       if (typeof authFence !== "number") throw authFence;
       if (await clearAuthBench(apiUrl, apiKey, keySuffix, slot, authFence)) {

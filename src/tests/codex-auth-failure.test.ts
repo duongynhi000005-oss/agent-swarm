@@ -7,6 +7,7 @@ describe("isCodexAuthFailureReason", () => {
   test.each([
     "[auth-error] Codex authentication failed — check OPENAI_API_KEY or ChatGPT login. Original error: workspace routing discovery unauthorized (401)",
     "[auth-error] Codex authentication failed — check OPENAI_API_KEY or ChatGPT login. Original error: Failed to refresh token: 400 Bad Request: Invalid 'refresh_token': empty string",
+    "[auth-error] Codex pool slot 1 authentication failed — credential may be revoked; re-run 'agent-swarm codex-login --slot 1' or check OPENAI_API_KEY. Original error: Failed to refresh token: 400 Bad Request: Invalid 'refresh_token': empty string",
     '[auth-error] Codex pool slot 2 [...d3Ove] revalidation failed: refresh rejected (401 {"error":"refresh_token_invalidated"}) — credential likely revoked; re-run codex-login for this slot.',
   ])("counts %s", (reason) => {
     expect(isCodexAuthFailureReason(reason)).toBe(true);
