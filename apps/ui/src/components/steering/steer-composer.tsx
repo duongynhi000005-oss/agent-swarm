@@ -86,6 +86,8 @@ function describeOutcome(result: SteerResult): string {
         : "Queued. It lands at the next turn boundary.";
     case "promoted":
       return "This harness can't be steered. Created a follow-up task instead.";
+    case "blocked":
+      return result.reason ? `Blocked: ${result.reason}` : "Blocked by an extension.";
   }
 }
 

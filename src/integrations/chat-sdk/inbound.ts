@@ -160,6 +160,14 @@ export async function handleChatInbound(
       resolveSender: () => resolveChatSender(adapter, message.author.userId),
     });
     if (steering) {
+      if (steering.result.outcome === "blocked") {
+        console.info(
+          "[chat-sdk] pre.task.steer blocked:",
+          steering.result.extension?.name ?? "extension",
+          scrubSecrets(steering.result.reason ?? ""),
+        );
+        return;
+      }
       console.log(
         `[chat-sdk] ${adapter} message steered task ${steering.task.id} (${steering.result.outcome})`,
       );

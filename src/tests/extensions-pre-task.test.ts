@@ -14,7 +14,9 @@ import {
   createWorkflowRunStep,
   getDbClient,
   getKv,
+  getLogsByTaskId,
   getMostRecentTaskInThread,
+  getSteeringMessagesForTask,
   getTaskByWorkflowRunStepId,
   initDb,
   startTask,
@@ -22,12 +24,14 @@ import {
 import * as dbClient from "../be/db-client";
 import type { InstallExtensionArgs as ExtensionInstallBody } from "../be/extensions/db";
 import { installExtension, listExtensionRuns } from "../be/extensions/db";
+import { requestSteering } from "../be/steering";
 import { getCatalogEntry } from "../extensions/catalog";
 import type { TaskBlockedEvent, TaskCreateEvent } from "../extensions/contract";
 import { disableExtension, enableExtension, stopExtensionRuntime } from "../extensions/lifecycle";
 import { initExtensionPostBridge, teardownExtensionPostBridge } from "../extensions/post-bridge";
 import { handleTasks } from "../http/tasks";
 import { dispatchScheduleTarget } from "../scheduler/scheduler";
+import * as slackApp from "../slack/app";
 import { bufferThreadMessage, instantFlush } from "../slack/thread-buffer";
 import { createTaskWithSiblingAwareness } from "../tasks/sibling-awareness";
 import { createWorkerTaskFollowUp } from "../tasks/worker-follow-up";
@@ -1020,5 +1024,246 @@ export default extension;
     expect(runs.some((run) => run.event === "pre.task.followUp" && run.action === "error")).toBe(
       true,
     );
+  });
+
+  describe("pre.task.steer", () => {
+    const previousSteeringEnabled = process.env.STEERING_ENABLED;
+    const previousSlackSteering = process.env.SLACK_THREAD_STEERING;
+    const previousSlackSteeringMode = process.env.SLACK_THREAD_STEERING_MODE;
+
+    beforeAll(() => {
+      process.env.STEERING_ENABLED = "true";
+      process.env.SLACK_THREAD_STEERING = "lead";
+      process.env.SLACK_THREAD_STEERING_MODE = "queue";
+    });
+
+    afterAll(() => {
+      if (previousSteeringEnabled === undefined) delete process.env.STEERING_ENABLED;
+      else process.env.STEERING_ENABLED = previousSteeringEnabled;
+      if (previousSlackSteering === undefined) delete process.env.SLACK_THREAD_STEERING;
+      else process.env.SLACK_THREAD_STEERING = previousSlackSteering;
+      if (previousSlackSteeringMode === undefined) delete process.env.SLACK_THREAD_STEERING_MODE;
+      else process.env.SLACK_THREAD_STEERING_MODE = previousSlackSteeringMode;
+    });
+
+    test("gate-task-steer fixture covers continue, modify, and block on requestSteering", async () => {
+      const lead = await createAgent({
+        name: "steer-hook-lead",
+        isLead: true,
+        status: "busy",
+        harnessProvider: "pi",
+      });
+      const user = await createUser({ name: "Steer Requester" });
+      const task = await createTaskExtended("Active task for steering", {
+        agentId: lead.id,
+        source: "api",
+        requestedByUserId: user.id,
+      });
+      await startTask(task.id);
+
+      const ext = await installAndEnable("gate-task-steer", {
+        blockContaining: "[DROP]",
+        rewritePrefix: "[Rewritten] ",
+      });
+
+      const modified = await requestSteering({
+        taskId: task.id,
+        message: "check the edge case",
+        mode: "queue",
+        source: "ui",
+        createdByKind: "user",
+        createdByUserId: user.id,
+      });
+      expect(modified.outcome).toBe("queued");
+      const afterModify = await getSteeringMessagesForTask(task.id);
+      expect(afterModify).toHaveLength(1);
+      expect(afterModify[0]?.body).toBe("[Rewritten] check the edge case");
+
+      const blocked = await requestSteering({
+        taskId: task.id,
+        message: "please [DROP] this steer",
+        mode: "queue",
+        source: "ui",
+        createdByKind: "user",
+        createdByUserId: user.id,
+      });
+      expect(blocked).toEqual({
+        outcome: "blocked",
+        effectiveMode: "queue",
+        degradedFrom: undefined,
+        reason: 'Steering containing "[DROP]" is blocked',
+        extension: { id: ext.id, name: "gate-task-steer" },
+      });
+      expect(await getSteeringMessagesForTask(task.id)).toHaveLength(1);
+
+      await disableExtension(ext.id);
+      await getDbClient().run("DELETE FROM extensions");
+      const passThrough = await installAndEnable("gate-task-steer", {});
+      const continued = await requestSteering({
+        taskId: task.id,
+        message: "untouched message",
+        mode: "queue",
+        source: "api",
+        createdByKind: "user",
+        createdByUserId: user.id,
+      });
+      expect(continued.outcome).toBe("queued");
+      const allMessages = await getSteeringMessagesForTask(task.id);
+      expect(allMessages).toHaveLength(2);
+      expect(allMessages.some((m) => m.body === "untouched message")).toBe(true);
+
+      const runs = await listExtensionRuns(passThrough.id);
+      expect(runs).toContainEqual(
+        expect.objectContaining({
+          event: "pre.task.steer",
+          action: "continue",
+          agentId: lead.id,
+          subject: `task ${task.id}: steer (api)`,
+        }),
+      );
+    });
+
+    test("Slack thread buffer flush drops blocked steers with no task_steering log rows and reacts no_entry", async () => {
+      const lead = await createAgent({
+        name: "slack-steer-hook-lead",
+        isLead: true,
+        status: "busy",
+        harnessProvider: "pi",
+      });
+      const channelId = "C_STEER_HOOK";
+      const threadTs = "9100.0001";
+      const task = await createTaskExtended("Running Slack task", {
+        agentId: lead.id,
+        source: "slack",
+        slackChannelId: channelId,
+        slackThreadTs: threadTs,
+        slackUserId: "U_STEER_OWNER",
+      });
+      await startTask(task.id);
+
+      const ext = await installAndEnable("gate-task-steer", {
+        blockContaining: "NOSTEER",
+      });
+
+      const reactions: Array<{ channel: string; name: string; timestamp: string }> = [];
+      const postMessages: unknown[] = [];
+      const appSpy = spyOn(slackApp, "getSlackApp").mockReturnValue({
+        client: {
+          reactions: {
+            add: async (args: { channel: string; name: string; timestamp: string }) => {
+              reactions.push(args);
+              return { ok: true };
+            },
+          },
+          users: {
+            info: async () => ({ ok: true, user: { profile: {} } }),
+          },
+          chat: {
+            postMessage: async (args: unknown) => {
+              postMessages.push(args);
+              return { ok: true };
+            },
+          },
+        },
+      } as unknown as NonNullable<ReturnType<typeof slackApp.getSlackApp>>);
+      const infoSpy = spyOn(console, "info").mockImplementation(() => {});
+
+      try {
+        bufferThreadMessage(
+          channelId,
+          threadTs,
+          "skip NOSTEER please",
+          "U_STEER_BLOCKED",
+          "9100.0002",
+        );
+        bufferThreadMessage(channelId, threadTs, "valid follow-up", "U_STEER_ALLOWED", "9100.0003");
+        await instantFlush(`${channelId}:${threadTs}`);
+
+        const messages = await getSteeringMessagesForTask(task.id);
+        expect(messages).toHaveLength(1);
+        expect(messages[0]?.body).toBe("valid follow-up");
+
+        const logs = (await getLogsByTaskId(task.id)).filter(
+          (log) => log.eventType === "task_steering",
+        );
+        expect(
+          logs.filter(
+            (log) =>
+              log.newValue === "slack_reaction" &&
+              (log.metadata as { slackMessageTs?: string } | undefined)?.slackMessageTs ===
+                "9100.0002",
+          ),
+        ).toEqual([]);
+        expect(
+          logs.filter(
+            (log) =>
+              log.newValue === "slack_reaction" &&
+              (log.metadata as { slackMessageTs?: string } | undefined)?.slackMessageTs ===
+                "9100.0003",
+          ),
+        ).toHaveLength(1);
+
+        expect(reactions).toContainEqual({
+          channel: channelId,
+          timestamp: "9100.0002",
+          name: "no_entry",
+        });
+        expect(infoSpy).toHaveBeenCalledWith(
+          "[Slack] pre.task.steer blocked:",
+          "gate-task-steer",
+          'Steering containing "NOSTEER" is blocked',
+        );
+        expect(postMessages).toHaveLength(1);
+
+        const runs = await listExtensionRuns(ext.id);
+        expect(runs.map((r) => ({ event: r.event, action: r.action })).reverse()).toEqual([
+          { event: "pre.task.steer", action: "block" },
+          { event: "pre.task.steer", action: "continue" },
+        ]);
+      } finally {
+        appSpy.mockRestore();
+        infoSpy.mockRestore();
+      }
+    });
+
+    test("invalid pre.task.steer modifications fail open and deliver the original message", async () => {
+      const lead = await createAgent({
+        name: "invalid-steer-lead",
+        isLead: true,
+        status: "busy",
+        harnessProvider: "pi",
+      });
+      const task = await createTaskExtended("Task with invalid steer hook", {
+        agentId: lead.id,
+        source: "api",
+      });
+      await startTask(task.id);
+
+      const extension = await installSource(
+        "invalid-steer-modify",
+        `import { modify, type SwarmExtension } from "swarm-extension";
+const extension: SwarmExtension = (api) => {
+  api.on("pre.task.steer", () => modify({ message: "   " }));
+};
+export default extension;
+`,
+      );
+
+      const result = await requestSteering({
+        taskId: task.id,
+        message: "original valid steer",
+        mode: "queue",
+        source: "api",
+      });
+      expect(result.outcome).toBe("queued");
+      const messages = await getSteeringMessagesForTask(task.id);
+      expect(messages).toHaveLength(1);
+      expect(messages[0]?.body).toBe("original valid steer");
+
+      const runs = await listExtensionRuns(extension.id);
+      expect(runs.some((run) => run.event === "pre.task.steer" && run.action === "error")).toBe(
+        true,
+      );
+    });
   });
 });

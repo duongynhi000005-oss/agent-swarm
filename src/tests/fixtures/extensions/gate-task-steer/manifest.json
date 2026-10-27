@@ -1,0 +1,9 @@
+{
+  "name": "gate-task-steer",
+  "description": "Continues, rewrites, or blocks task steering messages",
+  "version": "1.0.0",
+  "runtime": "api",
+  "assets": {
+    "hooks": "hooks.ts"
+  }
+}

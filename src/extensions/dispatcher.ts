@@ -157,6 +157,11 @@ export function runContext(event: keyof SwarmEventMap, payload: unknown): RunCon
       subject =
         `task ${stringField(payload, "completedTask", "id") ?? "?"} ${stringField(payload, "status") ?? ""}`.trim();
       break;
+    // Ids only: a steering message text is user or agent conversation content.
+    case "pre.task.steer":
+      agentId = stringField(payload, "task", "agentId");
+      subject = `task ${stringField(payload, "task", "id") ?? "?"}: steer (${stringField(payload, "source") ?? "?"})`;
+      break;
     case "pre.slack.route":
     case "post.slack.message":
       subject = `channel ${stringField(payload, "channelId") ?? "?"}: ${snippet(field(payload, "text"), 60)}`;

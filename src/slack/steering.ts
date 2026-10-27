@@ -9,6 +9,7 @@ export interface SlackThreadSteeringRequest {
   message: string;
   messageTimestamps?: string[];
   requestedByUserId?: string;
+  slackUserId?: string;
 }
 
 export interface SlackThreadSteeringResult {
@@ -47,19 +48,23 @@ export async function requestSlackThreadSteering(
   const result = await requestSteering({
     taskId: task.id,
     message: args.message,
+    messageTimestamps: args.messageTimestamps,
     mode,
     onUnsupported: "degrade",
     source: "slack",
     createdByKind: "user",
     createdByUserId: args.requestedByUserId,
+    slackUserId: args.slackUserId,
   });
-  for (const messageTs of args.messageTimestamps ?? []) {
-    await createLogEntry({
-      eventType: "task_steering",
-      taskId: task.id,
-      newValue: "slack_reaction",
-      metadata: { slackChannelId: args.channelId, slackMessageTs: messageTs },
-    });
+  if (result.outcome !== "blocked") {
+    for (const messageTs of args.messageTimestamps ?? []) {
+      await createLogEntry({
+        eventType: "task_steering",
+        taskId: task.id,
+        newValue: "slack_reaction",
+        metadata: { slackChannelId: args.channelId, slackMessageTs: messageTs },
+      });
+    }
   }
 
   return { task, result };

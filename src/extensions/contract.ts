@@ -197,6 +197,25 @@ export type TaskFollowUpModify = Partial<
   Pick<CreateTaskOptions, "agentId" | "priority" | "followUpConfig">
 > & { description?: string };
 
+export type SteeringSource = "ui" | "mcp" | "script" | "slack" | "api" | "chat";
+
+export interface TaskSteerEvent {
+  task: AgentTask;
+  message: string;
+  messageTimestamps?: string[];
+  sender: {
+    kind: "user" | "agent" | "system";
+    userId?: string;
+    agentId?: string;
+    slackUserId?: string;
+  };
+  source: SteeringSource;
+}
+
+export interface TaskSteerModify {
+  message?: string;
+}
+
 export interface SlackRouteEvent {
   channelId: string;
   userId: string;
@@ -421,6 +440,11 @@ export interface SwarmEventMap {
     event: TaskFollowUpEvent;
     modify: TaskFollowUpModify;
     result: PreResult<TaskFollowUpModify>;
+  };
+  "pre.task.steer": {
+    event: TaskSteerEvent;
+    modify: TaskSteerModify;
+    result: PreResult<TaskSteerModify>;
   };
   "pre.slack.route": {
     event: SlackRouteEvent;

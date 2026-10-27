@@ -2940,7 +2940,8 @@
             "enum": [
               "steered",
               "queued",
-              "promoted"
+              "promoted",
+              "blocked"
             ]
           },
           "steeringMessageId": {
@@ -2963,6 +2964,24 @@
             "enum": [
               "steer",
               "queue"
+            ]
+          },
+          "reason": {
+            "type": "string"
+          },
+          "extension": {
+            "type": "object",
+            "properties": {
+              "id": {
+                "type": "string"
+              },
+              "name": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "id",
+              "name"
             ]
           }
         },

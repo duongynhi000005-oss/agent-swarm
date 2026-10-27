@@ -240,9 +240,25 @@ async function slackFlush(
                 ),
           messageTimestamps: steeringItems.map((item) => item.ts),
           requestedByUserId,
+          slackUserId: originalRequesterId,
         })
       : null;
   if (steering) {
+    if (steering.result.outcome === "blocked") {
+      console.info(
+        "[Slack] pre.task.steer blocked:",
+        steering.result.extension?.name ?? "extension",
+        scrubSecrets(steering.result.reason ?? ""),
+      );
+      if (app) {
+        await ackSlackMessage(app.client, channelId, steeringItems.at(-1)!.ts, "no_entry");
+      }
+      if (nextSenderIndex !== -1) {
+        await slackFlush(items.slice(nextSenderIndex), key, immediate);
+      }
+      return;
+    }
+
     console.log(
       `[Slack] Buffer flushed → steering ${steering.result.outcome} for task ${steering.task.id}`,
     );

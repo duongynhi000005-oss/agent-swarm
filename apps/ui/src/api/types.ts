@@ -59,9 +59,9 @@ export interface ModelTierPreview {
   resolvedModel: string | null;
   alias: string | null;
 }
+export type { ReasoningEffortLevel };
 /** The effort enum, one definition shared with the API (`@desplega/model-catalog`). */
 export { REASONING_EFFORT_LEVELS };
-export type { ReasoningEffortLevel };
 
 export type AcpTarget = "opencode" | "gemini" | "copilot" | "qwen" | "kiro" | "goose" | "custom";
 
@@ -501,7 +501,7 @@ export type SteeringStatus = "pending" | "delivered" | "handled" | "promoted" | 
 export type SteeringSource = "ui" | "mcp" | "script" | "slack" | "api";
 
 /** What the server actually did with the request (the degradation ladder). */
-export type SteerOutcome = "steered" | "queued" | "promoted";
+export type SteerOutcome = "steered" | "queued" | "promoted" | "blocked";
 
 export interface SteeringMessage {
   id: string;
@@ -541,6 +541,8 @@ export interface SteerResult {
   effectiveMode: SteerMode;
   /** Present when the requested mode was downgraded (e.g. `steer` → `queue` on claude). */
   degradedFrom?: SteerMode;
+  reason?: string;
+  extension?: { id: string; name: string };
 }
 
 export interface AgentWithTasks extends Agent {

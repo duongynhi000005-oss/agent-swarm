@@ -45,6 +45,9 @@ export const steerTaskOutputSchema = swarmToolOutputSchema({
 type SteerTaskArgs = z.input<typeof steerTaskInputSchema>;
 
 function resultMessage(result: SteerResult): string {
+  if (result.outcome === "blocked") {
+    return result.reason ? `Steering blocked: ${result.reason}` : "Steering blocked by extension.";
+  }
   if (result.outcome === "steered") return "Steered task immediately.";
   if (result.outcome === "promoted") return "Promoted to a follow-up task.";
   if (result.degradedFrom) {

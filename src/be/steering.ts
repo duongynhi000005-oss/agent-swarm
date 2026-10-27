@@ -1,3 +1,5 @@
+import { z } from "zod";
+import { dispatchPre } from "../extensions/dispatcher";
 import {
   type Agent,
   type AgentTask,
@@ -45,13 +47,22 @@ export function isSteeringEnabled(): boolean {
 export interface RequestSteeringArgs {
   taskId: string;
   message: string;
+  messageTimestamps?: string[];
   mode?: SteerMode;
   onUnsupported?: OnUnsupported;
   source?: SteeringSource;
   createdByKind?: SteeringMessage["createdByKind"];
   createdByUserId?: string;
   createdByAgentId?: string;
+  slackUserId?: string;
 }
+
+/** Runtime check for `pre.task.steer` modifications (mirrors `TaskSteerModify`). */
+const TaskSteerModifySchema = z
+  .object({
+    message: z.string().trim().min(1).optional(),
+  })
+  .strict();
 
 async function providerForTask(task: AgentTask): Promise<ProviderName> {
   const agent = task.agentId ? await getAgentById(task.agentId) : null;
@@ -302,12 +313,60 @@ export async function requestSteering(args: RequestSteeringArgs): Promise<SteerR
     );
   }
 
+  const source = args.source ?? "api";
+  const createdByKind = args.createdByKind ?? "system";
+  const preSteer = await dispatchPre(
+    "pre.task.steer",
+    {
+      task,
+      message: args.message,
+      ...(args.messageTimestamps ? { messageTimestamps: args.messageTimestamps } : {}),
+      sender: {
+        kind: createdByKind,
+        ...(args.createdByUserId ? { userId: args.createdByUserId } : {}),
+        ...(args.createdByAgentId ? { agentId: args.createdByAgentId } : {}),
+        ...(args.slackUserId ? { slackUserId: args.slackUserId } : {}),
+      },
+      source,
+    },
+    {
+      validateModify: (data) => {
+        const parsed = TaskSteerModifySchema.safeParse(data);
+        return parsed.success
+          ? { success: true, data: parsed.data }
+          : { success: false, error: new Error(parsed.error.message) };
+      },
+    },
+  );
+  if (preSteer.action === "block") {
+    const preStartBlocked =
+      task.status === "unassigned" || task.status === "offered" || task.status === "pending";
+    const degradedFromBlocked =
+      requestedMode === "steer" &&
+      supportedModes.length > 0 &&
+      (!supportedModes.includes("steer") || preStartBlocked)
+        ? requestedMode
+        : undefined;
+    return {
+      outcome: "blocked",
+      effectiveMode: degradedFromBlocked ? "queue" : requestedMode,
+      degradedFrom: degradedFromBlocked,
+      reason: scrubSecrets(preSteer.reason),
+      extension: preSteer.extension,
+    };
+  }
+
+  const steeredMessage =
+    preSteer.action === "modify" && preSteer.data.message !== undefined
+      ? preSteer.data.message
+      : args.message;
+
   const activeTask = task.status === "paused" ? await resumeTask(task.id) : task;
   if (!activeTask) {
     throw new SteeringRequestError("Failed to resume paused task", 500);
   }
 
-  const body = scrubSecrets(args.message);
+  const body = scrubSecrets(steeredMessage);
   // A task whose session hasn't started yet can still accept queued steering:
   // the row stays `pending` and the worker delivers it once the session is
   // live (the dispatch poll covers every active task). Interrupting a session
@@ -334,8 +393,8 @@ export async function requestSteering(args: RequestSteeringArgs): Promise<SteerR
     taskId: activeTask.id,
     body,
     mode: requestedMode,
-    source: args.source ?? "api",
-    createdByKind: args.createdByKind ?? "system",
+    source,
+    createdByKind,
     createdByUserId: args.createdByUserId,
     createdByAgentId: args.createdByAgentId,
   });
