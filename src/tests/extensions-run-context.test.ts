@@ -99,4 +99,19 @@ describe("runContext", () => {
       { agentId: null, subject: "channel C1: hello" },
     );
   });
+
+  test("task steering records the steering agent (or task assignee) and a scrubbed message snippet", () => {
+    const context = runContext("pre.task.steer", {
+      task: { id: "task-9", agentId: "worker-1", task: "Run migration" },
+      message: `steer with token=sk-ant-${"b".repeat(40)} ${"y".repeat(200)}`,
+      mode: "queue",
+      source: "mcp",
+      createdByKind: "agent",
+      createdByAgentId: "lead-1",
+    });
+    expect(context.agentId).toBe("lead-1");
+    expect(context.subject?.startsWith("task task-9: ")).toBe(true);
+    expect(context.subject?.length).toBeLessThan(100);
+    expect(context.subject?.includes("sk-ant-")).toBe(false);
+  });
 });

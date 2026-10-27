@@ -301,4 +301,20 @@ export default extension;
     if (!result.ok)
       expect(result.diagnostics.join("\n")).toContain("not assignable to type 'false'");
   });
+
+  test("accepts the steer-gate fixture and rejects disallowed pre.task.steer modify fields", async () => {
+    const steerGate = await loadBundleFixture("steer-gate");
+    expect(await validateBundle(steerGate)).toEqual({ ok: true, manifest: steerGate.manifest });
+
+    const invalid = await loadBundleFixture("minimal");
+    invalid.files["hooks.ts"] = `import type { SwarmExtension } from "swarm-extension";
+const extension: SwarmExtension = (api) => {
+  api.on("pre.task.steer", () => ({ action: "modify", data: { taskId: "other" } }));
+};
+export default extension;
+`;
+    const result = await validateBundle(invalid);
+    expect(result.ok).toBe(false);
+    if (!result.ok) expect(result.diagnostics.join("\n")).toContain("taskId");
+  });
 });

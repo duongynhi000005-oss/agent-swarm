@@ -1,0 +1,9 @@
+{
+  "name": "steer-gate",
+  "description": "Filters or rewrites steering messages before delivery",
+  "version": "1.0.0",
+  "runtime": "api",
+  "assets": {
+    "hooks": "hooks.ts"
+  }
+}

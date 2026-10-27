@@ -10,6 +10,7 @@ import {
   getTasksByAgentId,
   isExtensionAgent,
 } from "../be/db";
+import { SteeringBlockedError } from "../be/steering";
 import { dispatchPre } from "../extensions/dispatcher";
 import { resolveTemplate } from "../prompts/resolver";
 import { slackContextKey } from "../tasks/context-key";
@@ -915,12 +916,14 @@ export function registerMessageHandler(app: App): void {
       } catch (error) {
         // A policy block is an answered outcome; anything else is a failure the
         // user sees as "could not assign" and the dispatcher must not call success.
-        if (!(error instanceof TaskCreationBlockedError)) {
+        const isPolicyBlock =
+          error instanceof TaskCreationBlockedError || error instanceof SteeringBlockedError;
+        if (!isPolicyBlock) {
           reportSlackInboundFailure("task_creation_error");
         }
         results.failed.push({
           agentName: agent.name,
-          reason: error instanceof TaskCreationBlockedError ? error.reason : "error",
+          reason: isPolicyBlock ? error.reason : "error",
         });
       }
     }

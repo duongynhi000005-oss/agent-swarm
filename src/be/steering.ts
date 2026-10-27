@@ -1,3 +1,5 @@
+import { z } from "zod";
+import { dispatchPre, extensionIdForAgent } from "../extensions/dispatcher";
 import {
   type Agent,
   type AgentTask,
@@ -7,6 +9,7 @@ import {
   type SteeringMessage,
   type SteeringSource,
   type SteerMode,
+  SteerModeSchema,
   type SteerResult,
 } from "../types";
 import { scrubSecrets } from "../utils/secret-scrubber";
@@ -36,6 +39,27 @@ export class SteeringRequestError extends Error {
     this.name = "SteeringRequestError";
   }
 }
+
+export class SteeringBlockedError extends SteeringRequestError {
+  constructor(
+    readonly reason: string,
+    readonly extension: { id: string; name: string },
+  ) {
+    super(reason, 422);
+    this.name = "SteeringBlockedError";
+  }
+}
+
+/** Runtime check for `pre.task.steer` modifications (mirrors `TaskSteerModify`). */
+const TaskSteerModifySchema = z
+  .object({
+    message: z
+      .string()
+      .refine((value) => value.trim().length > 0, "Steering message must not be empty")
+      .optional(),
+    mode: SteerModeSchema.optional(),
+  })
+  .strict();
 
 /** Server-side entry point for the global steering kill switch. */
 export function isSteeringEnabled(): boolean {
@@ -289,7 +313,37 @@ export async function requestSteering(args: RequestSteeringArgs): Promise<SteerR
     throw new SteeringRequestError("Steering message must not be empty", 400);
   }
 
-  const requestedMode = args.mode ?? "queue";
+  const initialMode = args.mode ?? "queue";
+  const source = args.source ?? "api";
+  const createdByKind = args.createdByKind ?? "system";
+  const preSteer = await dispatchPre(
+    "pre.task.steer",
+    {
+      task,
+      message: args.message,
+      mode: initialMode,
+      source,
+      createdByKind,
+      ...(args.createdByAgentId ? { createdByAgentId: args.createdByAgentId } : {}),
+      ...(args.createdByUserId ? { createdByUserId: args.createdByUserId } : {}),
+    },
+    {
+      skipExtensionId: extensionIdForAgent(args.createdByAgentId),
+      validateModify: (data) => {
+        const parsed = TaskSteerModifySchema.safeParse(data);
+        return parsed.success
+          ? { success: true, data: parsed.data }
+          : { success: false, error: new Error(parsed.error.message) };
+      },
+    },
+  );
+  if (preSteer.action === "block") {
+    throw new SteeringBlockedError(preSteer.reason, preSteer.extension);
+  }
+
+  const changes = preSteer.action === "modify" ? preSteer.data : {};
+  const message = changes.message ?? args.message;
+  const requestedMode = changes.mode ?? initialMode;
   const onUnsupported = args.onUnsupported ?? "degrade";
   const provider = await providerForTask(task);
   const supportedModes = PROVIDER_STEER_CAPABILITIES[provider];
@@ -307,7 +361,7 @@ export async function requestSteering(args: RequestSteeringArgs): Promise<SteerR
     throw new SteeringRequestError("Failed to resume paused task", 500);
   }
 
-  const body = scrubSecrets(args.message);
+  const body = scrubSecrets(message);
   // A task whose session hasn't started yet can still accept queued steering:
   // the row stays `pending` and the worker delivers it once the session is
   // live (the dispatch poll covers every active task). Interrupting a session
@@ -334,8 +388,8 @@ export async function requestSteering(args: RequestSteeringArgs): Promise<SteerR
     taskId: activeTask.id,
     body,
     mode: requestedMode,
-    source: args.source ?? "api",
-    createdByKind: args.createdByKind ?? "system",
+    source,
+    createdByKind,
     createdByUserId: args.createdByUserId,
     createdByAgentId: args.createdByAgentId,
   });

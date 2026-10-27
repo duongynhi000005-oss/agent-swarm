@@ -45,6 +45,7 @@ import {
   markSteeringUndeliverable,
   requestSteering,
   STEERING_MOVED_ERROR,
+  SteeringBlockedError,
   SteeringRequestError,
 } from "../be/steering";
 import { getTaskCitations, TaskCitationSchema } from "../be/task-citations";
@@ -450,7 +451,12 @@ const steerTaskRoute = route({
     403: { description: "Caller cannot steer this task" },
     404: { description: "Task not found" },
     422: {
-      description: "Requested mode unsupported by the target harness and onUnsupported=fail",
+      description:
+        "Requested mode unsupported by the target harness and onUnsupported=fail, or steering blocked by an extension",
+      schema: z.object({
+        error: z.string(),
+        extension: z.object({ id: z.string(), name: z.string() }).optional(),
+      }),
     },
   },
 });
@@ -1385,6 +1391,10 @@ export async function handleTasks(
       });
       steerTaskRoute.respond(res, 200, result);
     } catch (error) {
+      if (error instanceof SteeringBlockedError) {
+        steerTaskRoute.respond(res, 422, { error: error.reason, extension: error.extension });
+        return true;
+      }
       if (error instanceof SteeringRequestError) {
         jsonError(res, error.message, error.statusCode);
         return true;

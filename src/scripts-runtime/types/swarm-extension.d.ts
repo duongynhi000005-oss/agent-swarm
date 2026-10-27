@@ -491,6 +491,19 @@ declare module "swarm-extension" {
   > & {
     description?: string;
   };
+  export interface TaskSteerEvent {
+    task: AgentTask;
+    message: string;
+    mode: "steer" | "queue";
+    source: "ui" | "mcp" | "script" | "slack" | "api" | "chat";
+    createdByKind: "user" | "agent" | "system";
+    createdByAgentId?: string;
+    createdByUserId?: string;
+  }
+  export interface TaskSteerModify {
+    message?: string;
+    mode?: "steer" | "queue";
+  }
   export interface SlackRouteEvent {
     channelId: string;
     userId: string;
@@ -717,6 +730,11 @@ declare module "swarm-extension" {
       event: TaskFollowUpEvent;
       modify: TaskFollowUpModify;
       result: PreResult<TaskFollowUpModify>;
+    };
+    "pre.task.steer": {
+      event: TaskSteerEvent;
+      modify: TaskSteerModify;
+      result: PreResult<TaskSteerModify>;
     };
     "pre.slack.route": {
       event: SlackRouteEvent;

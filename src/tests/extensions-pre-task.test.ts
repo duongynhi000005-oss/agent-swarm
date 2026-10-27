@@ -12,9 +12,12 @@ import {
   createWorkflow,
   createWorkflowRun,
   createWorkflowRunStep,
+  getChildTasks,
   getDbClient,
   getKv,
+  getLogsByTaskId,
   getMostRecentTaskInThread,
+  getSteeringMessagesForTask,
   getTaskByWorkflowRunStepId,
   initDb,
   startTask,
@@ -22,6 +25,7 @@ import {
 import * as dbClient from "../be/db-client";
 import type { InstallExtensionArgs as ExtensionInstallBody } from "../be/extensions/db";
 import { installExtension, listExtensionRuns } from "../be/extensions/db";
+import { requestSteering } from "../be/steering";
 import { getCatalogEntry } from "../extensions/catalog";
 import type { TaskBlockedEvent, TaskCreateEvent } from "../extensions/contract";
 import { disableExtension, enableExtension, stopExtensionRuntime } from "../extensions/lifecycle";
@@ -32,6 +36,7 @@ import { bufferThreadMessage, instantFlush } from "../slack/thread-buffer";
 import { createTaskWithSiblingAwareness } from "../tasks/sibling-awareness";
 import { createWorkerTaskFollowUp } from "../tasks/worker-follow-up";
 import { registerSendTaskTool, sendTaskHandler } from "../tools/send-task";
+import { registerSteerTaskTool } from "../tools/steer-task";
 import { registerTaskActionTool } from "../tools/task-action";
 import { userCtx } from "../tools/task-tool-ctx";
 import { markExtensionRequestOrigin } from "../tools/utils";
@@ -1020,5 +1025,259 @@ export default extension;
     expect(runs.some((run) => run.event === "pre.task.followUp" && run.action === "error")).toBe(
       true,
     );
+  });
+
+  describe("pre.task.steer", () => {
+    const previousSteeringEnabled = process.env.STEERING_ENABLED;
+    const previousSlackSteering = process.env.SLACK_THREAD_STEERING;
+    const previousSlackSteeringMode = process.env.SLACK_THREAD_STEERING_MODE;
+
+    beforeEach(async () => {
+      process.env.STEERING_ENABLED = "true";
+      delete process.env.SLACK_THREAD_STEERING;
+      delete process.env.SLACK_THREAD_STEERING_MODE;
+      await getDbClient().run("DELETE FROM task_steering_messages");
+    });
+
+    afterAll(() => {
+      if (previousSteeringEnabled === undefined) delete process.env.STEERING_ENABLED;
+      else process.env.STEERING_ENABLED = previousSteeringEnabled;
+      if (previousSlackSteering === undefined) delete process.env.SLACK_THREAD_STEERING;
+      else process.env.SLACK_THREAD_STEERING = previousSlackSteering;
+      if (previousSlackSteeringMode === undefined) delete process.env.SLACK_THREAD_STEERING_MODE;
+      else process.env.SLACK_THREAD_STEERING_MODE = previousSlackSteeringMode;
+    });
+
+    async function postSteer(
+      taskId: string,
+      body: Record<string, unknown>,
+      agentId?: string,
+    ): Promise<TestResponse> {
+      const req = Readable.from([Buffer.from(JSON.stringify(body))]) as IncomingMessage;
+      req.method = "POST";
+      req.url = `/api/tasks/${taskId}/steer`;
+      req.headers = {
+        "content-type": "application/json",
+        ...(agentId ? { "x-agent-id": agentId } : {}),
+      };
+      let status = 200;
+      let text = "";
+      const res = {
+        headersSent: false,
+        writableEnded: false,
+        setHeader() {},
+        writeHead(code: number) {
+          status = code;
+          this.headersSent = true;
+          return this;
+        },
+        end(chunk?: unknown) {
+          if (chunk !== undefined) text += String(chunk);
+          this.writableEnded = true;
+          return this;
+        },
+      } as unknown as ServerResponse;
+
+      expect(
+        await handleTasks(
+          req,
+          res,
+          ["api", "tasks", taskId, "steer"],
+          new URLSearchParams(),
+          agentId,
+        ),
+      ).toBe(true);
+      return { status, body: JSON.parse(text) as Record<string, unknown> };
+    }
+
+    function registeredSteerTask(server: McpServer) {
+      return (
+        server as unknown as {
+          _registeredTools: Record<
+            string,
+            { handler: (args: unknown, extra: unknown) => Promise<Record<string, unknown>> }
+          >;
+        }
+      )._registeredTools["steer-task"]!;
+    }
+
+    test("dispatches outside any transaction and handles continue, modify, and block across REST and MCP", async () => {
+      const lead = await createAgent({
+        name: "steer-lead",
+        isLead: true,
+        status: "busy",
+        harnessProvider: "pi",
+      });
+      const task = await createTaskExtended("running task to steer", {
+        agentId: lead.id,
+        creatorAgentId: lead.id,
+        source: "api",
+      });
+      await startTask(task.id);
+
+      const gate = await installAndEnable("steer-gate", {
+        blockedSubstring: "FORBIDDEN",
+        prefix: "[policy] ",
+        mode: "steer",
+      });
+
+      const observed: boolean[] = [];
+      const original = dbClient.isInTransaction;
+      const transactionSpy = spyOn(dbClient, "isInTransaction").mockImplementation(() => {
+        const active = original();
+        observed.push(active);
+        return active;
+      });
+      try {
+        const modified = await postSteer(
+          task.id,
+          { message: "focus on tests", mode: "queue" },
+          lead.id,
+        );
+        expect(modified.status).toBe(200);
+        expect(modified.body).toMatchObject({ outcome: "steered", effectiveMode: "steer" });
+        expect(observed.length).toBeGreaterThan(0);
+        expect(observed.every((active) => active === false)).toBe(true);
+      } finally {
+        transactionSpy.mockRestore();
+      }
+
+      const stored = await getSteeringMessagesForTask(task.id);
+      expect(stored).toHaveLength(1);
+      expect(stored[0]).toMatchObject({
+        body: "[policy] focus on tests",
+        mode: "steer",
+        source: "api",
+        createdByKind: "agent",
+        createdByAgentId: lead.id,
+      });
+
+      const blockedRest = await postSteer(
+        task.id,
+        { message: "do FORBIDDEN change", mode: "queue" },
+        lead.id,
+      );
+      expect(blockedRest).toEqual({
+        status: 422,
+        body: {
+          error: 'Steering message contains blocked text "FORBIDDEN"',
+          extension: { id: gate.id, name: "steer-gate" },
+        },
+      });
+      expect(await getSteeringMessagesForTask(task.id)).toHaveLength(1);
+
+      const server = new McpServer({ name: "pre-task-steer-mcp", version: "1.0.0" });
+      registerSteerTaskTool(server);
+      const blockedMcp = await registeredSteerTask(server).handler(
+        { taskId: task.id, message: "another FORBIDDEN steer", mode: "queue" },
+        { sessionId: "steer-mcp", requestInfo: { headers: { "x-agent-id": lead.id } } },
+      );
+      expect(blockedMcp.isError).toBe(true);
+      expect(blockedMcp.structuredContent).toMatchObject({
+        success: false,
+        message: 'Steering message contains blocked text "FORBIDDEN"',
+      });
+      expect(await getSteeringMessagesForTask(task.id)).toHaveLength(1);
+
+      await disableExtension(gate.id);
+      const noOpGate = await installAndEnable("steer-gate", {});
+      const continued = await postSteer(task.id, { message: "plain steer" }, lead.id);
+      expect(continued.status).toBe(200);
+      expect(await getSteeringMessagesForTask(task.id)).toHaveLength(2);
+      expect(await listExtensionRuns(noOpGate.id)).toMatchObject([
+        { event: "pre.task.steer", action: "continue" },
+        { event: "pre.task.steer", action: "block" },
+        { event: "pre.task.steer", action: "block" },
+        { event: "pre.task.steer", action: "modify" },
+      ]);
+    });
+
+    test("Slack thread steering applies modifications and drops blocked steers without creating a fallback task", async () => {
+      process.env.SLACK_THREAD_STEERING = "lead";
+      process.env.SLACK_THREAD_STEERING_MODE = "queue";
+      const lead = await createAgent({
+        name: "slack-steer-lead",
+        isLead: true,
+        status: "busy",
+        harnessProvider: "pi",
+      });
+      const channelId = "C_PRE_STEER";
+      const threadTs = "9000.0001";
+      const created = await createTaskExtended("Slack lead task", {
+        agentId: lead.id,
+        source: "slack",
+        slackChannelId: channelId,
+        slackThreadTs: threadTs,
+        slackUserId: "U_STEER_USER",
+      });
+      const leadTask = (await startTask(created.id))!;
+
+      await installAndEnable("steer-gate", {
+        blockedSubstring: "DROP_ME",
+        prefix: "[slack-steered] ",
+      });
+
+      bufferThreadMessage(channelId, threadTs, "DROP_ME please", "U_STEER_USER", "9000.0002");
+      await instantFlush(`${channelId}:${threadTs}`);
+
+      expect(await getSteeringMessagesForTask(leadTask.id)).toEqual([]);
+      expect(
+        (await getLogsByTaskId(leadTask.id)).filter((log) => log.newValue === "slack_reaction"),
+      ).toEqual([]);
+      expect(await getChildTasks(leadTask.id)).toEqual([]);
+
+      bufferThreadMessage(channelId, threadTs, "keep this correction", "U_STEER_USER", "9000.0003");
+      await instantFlush(`${channelId}:${threadTs}`);
+
+      const messages = await getSteeringMessagesForTask(leadTask.id);
+      expect(messages).toHaveLength(1);
+      expect(messages[0]?.body).toBe("[slack-steered] keep this correction");
+      expect(await getChildTasks(leadTask.id)).toEqual([]);
+    });
+
+    test("invalid modifications fail open and extension-originated steers skip their own handler", async () => {
+      const lead = await createAgent({
+        name: "steer-fail-open-lead",
+        isLead: true,
+        status: "busy",
+        harnessProvider: "pi",
+      });
+      const task = await createTaskExtended("running task", {
+        agentId: lead.id,
+        source: "api",
+      });
+      await startTask(task.id);
+
+      const invalid = await installSource(
+        "invalid-steer-modify",
+        `import type { SwarmExtension } from "swarm-extension";
+const extension: SwarmExtension = (api) => {
+  api.on("pre.task.steer", () => ({ action: "modify", data: { message: "   " } }));
+};
+export default extension;
+`,
+      );
+
+      await requestSteering({ taskId: task.id, message: "kept message" });
+      const messages = await getSteeringMessagesForTask(task.id);
+      expect(messages).toHaveLength(1);
+      expect(messages[0]?.body).toBe("kept message");
+      expect(await listExtensionRuns(invalid.id)).toMatchObject([
+        { event: "pre.task.steer", action: "error" },
+      ]);
+
+      await stopExtensionRuntime();
+      await getDbClient().run("DELETE FROM extensions");
+      const selfBlocker = await installAndEnable("steer-gate", { blockedSource: "script" });
+      await requestSteering({
+        taskId: task.id,
+        message: "from extension itself",
+        source: "script",
+        createdByKind: "agent",
+        createdByAgentId: selfBlocker.agentId!,
+      });
+      expect(await getSteeringMessagesForTask(task.id)).toHaveLength(2);
+      expect(await listExtensionRuns(selfBlocker.id)).toEqual([]);
+    });
   });
 });

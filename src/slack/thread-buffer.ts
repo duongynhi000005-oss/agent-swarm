@@ -4,6 +4,7 @@ import {
   getLeadAgent,
   getMostRecentTaskInThread,
 } from "../be/db";
+import { SteeringBlockedError } from "../be/steering";
 import { findUserByExternalId } from "../be/users";
 import { createAdditiveBuffer } from "../tasks/additive-buffer";
 import { slackContextKey } from "../tasks/context-key";
@@ -226,22 +227,39 @@ async function slackFlush(
 
   // Steering carries text only. As on the mention path, files need a follow-up
   // task so its attachments exist before a worker can claim it.
-  const steering =
-    files.length === 0
-      ? await requestSlackThreadSteering({
-          channelId,
-          threadTs,
-          message:
-            nextSenderIndex === -1
-              ? combinedText
-              : await rewriteSlackMentions(
-                  steeringItems.map((item) => item.text).join("\n---\n"),
-                  botUserId,
-                ),
-          messageTimestamps: steeringItems.map((item) => item.ts),
-          requestedByUserId,
-        })
-      : null;
+  let steering: Awaited<ReturnType<typeof requestSlackThreadSteering>> = null;
+  if (files.length === 0) {
+    try {
+      steering = await requestSlackThreadSteering({
+        channelId,
+        threadTs,
+        message:
+          nextSenderIndex === -1
+            ? combinedText
+            : await rewriteSlackMentions(
+                steeringItems.map((item) => item.text).join("\n---\n"),
+                botUserId,
+              ),
+        messageTimestamps: steeringItems.map((item) => item.ts),
+        requestedByUserId,
+      });
+    } catch (error) {
+      if (!(error instanceof SteeringBlockedError)) throw error;
+
+      console.info(
+        "[Slack] pre.task.steer blocked:",
+        error.extension.name,
+        scrubSecrets(error.reason),
+      );
+      if (app) {
+        await ackSlackMessage(app.client, channelId, steeringItems.at(-1)!.ts, "no_entry");
+      }
+      if (nextSenderIndex !== -1) {
+        await slackFlush(items.slice(nextSenderIndex), key, immediate);
+      }
+      return;
+    }
+  }
   if (steering) {
     console.log(
       `[Slack] Buffer flushed → steering ${steering.result.outcome} for task ${steering.task.id}`,
