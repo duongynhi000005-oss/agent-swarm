@@ -6,6 +6,7 @@ import {
   adapterOfChatId,
   postChatMessage,
   unsentFilesSummary,
+  validateTelegramThreadId,
 } from "@/integrations/chat-sdk/outbound";
 import { resolveChatAttachmentRefs } from "@/integrations/chat-sdk/outbound-files";
 import { canUseChatVerb, chatAttachmentsSchema } from "@/tools/chat-access";
@@ -17,7 +18,7 @@ export const registerChatPostTool = (server: McpServer) => {
     {
       title: "Post to a chat thread or channel",
       description:
-        "Lead only. Post a message to any Chat SDK thread or channel (Telegram, Slack, Discord, Teams), outside the thread of your current task. Give threadId to reply in a thread, or channelId to start a new message in a channel. Ids carry the adapter prefix, such as telegram:12345. To answer the user of your current chat task, use chat-reply instead.",
+        "Lead only. Post a message to any Chat SDK thread or channel (Telegram, Slack, Discord, Teams), outside the thread of your current task. Give threadId to reply in a thread or Telegram forum topic (such as telegram:-100123:42), or channelId to start a new message in a channel (uses the channel's defaultThreadId when one is registered). Ids carry the adapter prefix, such as telegram:12345. To answer the user of your current chat task, use chat-reply instead.",
       annotations: { openWorldHint: true },
       inputSchema: z.object({
         adapter: z.enum(CHAT_SDK_ADAPTER_NAMES).describe("Chat SDK adapter name."),
@@ -25,12 +26,16 @@ export const registerChatPostTool = (server: McpServer) => {
           .string()
           .min(1)
           .optional()
-          .describe("Full SDK thread id, such as telegram:12345 or slack:C123:1700000000.000100."),
+          .describe(
+            "Full SDK thread id, such as telegram:12345, a Telegram forum topic telegram:-100123:42, or slack:C123:1700000000.000100.",
+          ),
         channelId: z
           .string()
           .min(1)
           .optional()
-          .describe("Full SDK channel id, such as slack:C123. Ignored when threadId is set."),
+          .describe(
+            "Full SDK channel id, such as slack:C123 or telegram:-100123. Uses the channel's defaultThreadId when one is registered. Ignored when threadId is set.",
+          ),
         text: z.string().min(1).max(20_000).describe("Markdown text to post."),
         attachments: chatAttachmentsSchema,
       }),
@@ -51,6 +56,13 @@ export const registerChatPostTool = (server: McpServer) => {
       if (!target) return toolErr("Give a threadId or a channelId.", { data });
       if (adapterOfChatId(target) !== adapter) {
         return toolErr(`The id ${target} does not belong to the ${adapter} adapter.`, { data });
+      }
+      if (adapter === "telegram" && threadId) {
+        try {
+          validateTelegramThreadId(threadId);
+        } catch (error) {
+          return toolErr(errorMessage(error), { data });
+        }
       }
       if (!(await canUseChatVerb(requestInfo, "integration.chat.post"))) {
         return toolErr(

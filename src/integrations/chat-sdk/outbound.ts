@@ -10,8 +10,33 @@ import {
   TELEGRAM_PHOTO_LIMIT,
 } from "./limits";
 import { errorMessage } from "./logger";
+import { getChatChannelMapping } from "./router";
 import { getChatInstance } from "./runtime";
 import { assertTrustedChatTarget } from "./teams-origin";
+
+/** Validate a `telegram:...` thread id before handing it to the adapter. */
+export function validateTelegramThreadId(threadId: string): void {
+  const parts = threadId.split(":");
+  if (parts[0] !== "telegram") {
+    throw new Error(`Invalid Telegram threadId "${threadId}": must start with "telegram:"`);
+  }
+  if (parts[1] === "biz") {
+    if (parts.length !== 4 || !parts[2] || !parts[3]) {
+      throw new Error(`Invalid Telegram business threadId "${threadId}"`);
+    }
+    return;
+  }
+  if ((parts.length !== 2 && parts.length !== 3) || !parts[1]) {
+    throw new Error(
+      `Invalid Telegram threadId "${threadId}": expected telegram:<chatId> or telegram:<chatId>:<topicId>`,
+    );
+  }
+  if (parts.length === 3 && !/^[1-9]\d*$/.test(parts[2] ?? "")) {
+    throw new Error(
+      `Invalid Telegram topic ID in threadId "${threadId}": topicId must be a positive integer`,
+    );
+  }
+}
 
 /** The adapter is not configured, failed to start, or is shutting down. */
 export class ChatAdapterUnavailableError extends Error {
@@ -356,10 +381,21 @@ export async function postChatMessage(args: {
   const parts = (typeof args.text === "string" ? [args.text] : args.text).map(scrubSecrets);
   const text = parts.join("\n\n");
 
+  let effectiveThreadId = args.threadId;
+  if (!effectiveThreadId && args.channelId) {
+    const mapping = await getChatChannelMapping(args.adapter, args.channelId);
+    if (mapping?.defaultThreadId) {
+      effectiveThreadId = mapping.defaultThreadId;
+    }
+  }
+  if (args.adapter === "telegram" && effectiveThreadId) {
+    validateTelegramThreadId(effectiveThreadId);
+  }
+
   let result: ChatPostResult;
   let target: PostTarget;
-  if (args.threadId) {
-    const thread = chat.thread(args.threadId);
+  if (effectiveThreadId) {
+    const thread = chat.thread(effectiveThreadId);
     target = thread;
     // Only adapters with a native reply (Telegram in this SDK version) anchor;
     // the others post unanchored, as before.

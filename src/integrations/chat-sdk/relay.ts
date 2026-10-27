@@ -1,5 +1,6 @@
 import {
   getAgentById,
+  getLatestActiveTaskByContextKey,
   getPendingChatRelayTasks,
   giveUpStaleChatRelays,
   markChatRelayAttempted,
@@ -12,6 +13,7 @@ import { chatThreadOfContextKey } from "@/tasks/context-key";
 import type { AgentTask } from "@/types";
 import { scrubSecrets } from "@/utils/secret-scrubber";
 import { workflowEventBus } from "@/workflows/event-bus";
+import { resolveAdapterApiUrl } from "./adapters";
 import { shortId } from "./commands";
 import { chatMessageLimit, splitChatMessage } from "./limits";
 import { errorMessage } from "./logger";
@@ -20,7 +22,31 @@ import { taskOutputChatFiles } from "./outbound-files";
 import { setChatMessageReaction } from "./reactions";
 import { getChatInstance, getChatSdkHealth } from "./runtime";
 import { sweepExpired } from "./state";
+import {
+  closeForumTopic,
+  getTelegramTopicRecord,
+  parseTelegramTopicThreadId,
+  resolveTelegramBotToken,
+} from "./telegram-api";
 import { stopTypingKeepalive } from "./typing";
+
+async function closeBotCreatedForumTopicIfDone(
+  threadId: string,
+  contextKey: string | undefined,
+): Promise<void> {
+  const parsed = parseTelegramTopicThreadId(threadId);
+  if (!parsed || !contextKey) return;
+  try {
+    const record = await getTelegramTopicRecord(parsed.chatId, parsed.topicId);
+    if (!record?.createdByBot) return;
+    if (await getLatestActiveTaskByContextKey(contextKey, "chat")) return;
+    const token = await resolveTelegramBotToken();
+    if (!token) return;
+    await closeForumTopic(resolveAdapterApiUrl("telegram"), token, parsed.chatId, parsed.topicId);
+  } catch (error) {
+    console.warn(`[chat-sdk] Could not close forum topic ${threadId}: ${errorMessage(error)}`);
+  }
+}
 
 /**
  * Stop retrying a relay row this long after its obligation was created. Time,
@@ -173,6 +199,9 @@ export async function processPendingChatRelays(
           task.mentionMessageId,
           terminalReactionEvent(task.status),
         );
+      }
+      if (target.adapter === "telegram") {
+        await closeBotCreatedForumTopicIfDone(target.threadId, task.contextKey);
       }
     } catch (error) {
       const message = errorMessage(error);

@@ -261,12 +261,36 @@ describe("register-chat-channel", () => {
     const result = await callTool(
       "register-chat-channel",
       { "x-agent-id": lead.id },
-      { adapter: "telegram", channelId: "-100556", agentId: worker.id, name: "ops" },
+      {
+        adapter: "telegram",
+        channelId: "-100556",
+        agentId: worker.id,
+        name: "ops",
+        defaultThreadId: "42",
+        topicPerTask: true,
+      },
     );
     expect(result.structuredContent.success).toBe(true);
     expect(result.structuredContent.key).toBe("telegram:-100556");
     const stored = await getKv(CHAT_CHANNELS_NAMESPACE, "telegram:-100556");
-    expect(stored?.value).toMatchObject({ agentId: worker.id, name: "ops" });
+    expect(stored?.value).toMatchObject({
+      agentId: worker.id,
+      name: "ops",
+      defaultThreadId: "telegram:-100556:42",
+      topicPerTask: true,
+    });
+
+    const badTopic = await callTool(
+      "register-chat-channel",
+      { "x-agent-id": lead.id },
+      {
+        adapter: "telegram",
+        channelId: "-100556",
+        agentId: worker.id,
+        defaultThreadId: "telegram:-100999:42",
+      },
+    );
+    expect(badTopic.structuredContent.success).toBe(false);
 
     const removed = await callTool(
       "unregister-chat-channel",
@@ -316,6 +340,43 @@ describe("chat tool permissions", () => {
     expect(result.structuredContent.success).toBe(true);
     expect(result.structuredContent.threadId).toBe("telegram:991010");
     expect(sendsTo("991010")).toHaveLength(1);
+  });
+
+  test("chat-post with a topic threadId lands in that topic, and channelId uses defaultThreadId", async () => {
+    const topicResult = await callTool(
+      "chat-post",
+      { "x-agent-id": lead.id },
+      { adapter: "telegram", threadId: "telegram:-100991020:42", text: "in topic 42" },
+    );
+    expect(topicResult.structuredContent.success).toBe(true);
+    expect(topicResult.structuredContent.threadId).toBe("telegram:-100991020:42");
+    expect(sendsTo("-100991020").at(-1)?.body.message_thread_id).toBe(42);
+
+    await callTool(
+      "register-chat-channel",
+      { "x-agent-id": lead.id },
+      {
+        adapter: "telegram",
+        channelId: "telegram:-100991021",
+        agentId: worker.id,
+        defaultThreadId: "telegram:-100991021:77",
+      },
+    );
+    const channelResult = await callTool(
+      "chat-post",
+      { "x-agent-id": lead.id },
+      { adapter: "telegram", channelId: "telegram:-100991021", text: "via default topic" },
+    );
+    expect(channelResult.structuredContent.success).toBe(true);
+    expect(channelResult.structuredContent.threadId).toBe("telegram:-100991021:77");
+    expect(sendsTo("-100991021").at(-1)?.body.message_thread_id).toBe(77);
+
+    const invalidTopic = await callTool(
+      "chat-post",
+      { "x-agent-id": lead.id },
+      { adapter: "telegram", threadId: "telegram:-100991021:0", text: "invalid" },
+    );
+    expect(invalidTopic.structuredContent.success).toBe(false);
   });
 
   test("chat-open-dm is refused for a worker and allowed for the lead", async () => {

@@ -1,8 +1,10 @@
-import type { TelegramMessage } from "@chat-adapter/telegram";
-import type { Adapter, Logger } from "chat";
+import type { TelegramMessage, TelegramUpdate } from "@chat-adapter/telegram";
+import type { Adapter, Logger, Message, WebhookOptions } from "chat";
+import { trackBackground } from "./background";
 import { type ChatSdkAdapterName, type ResolvedAdapterConfig, readApiUrlOverrides } from "./config";
 import { isTelegramReplyToBot, type TelegramRawMessage } from "./facts";
 import { withInfoFilter } from "./logger";
+import { recordTelegramTopicFromRawMessage } from "./telegram-api";
 import { getChatSdkTestHooks } from "./test-hooks";
 
 /**
@@ -69,7 +71,61 @@ export async function loadAdapter(
       // reply to a bot message that starts a reply chain has that same shape,
       // so it was never a mention and never reached a handler. Core decides
       // with `is_topic_message`, as the task header facts do.
+      // Likewise, Telegram sets `message_thread_id` on replies in non-forum
+      // supergroups (`is_topic_message !== true`). Stripping `message_thread_id`
+      // when `is_topic_message !== true` keeps non-forum supergroup replies in
+      // the group's `telegram:<chatId>` thread and contextKey.
+      const normalizeTopicMessage = <T extends TelegramMessage | undefined>(msg: T): T => {
+        if (!msg) return msg;
+        const raw = msg as TelegramMessage & { is_topic_message?: boolean };
+        if (raw.message_thread_id !== undefined && raw.is_topic_message !== true) {
+          return { ...msg, message_thread_id: undefined };
+        }
+        return msg;
+      };
       class SwarmTelegramAdapter extends TelegramAdapter {
+        protected override processUpdate(
+          update: TelegramUpdate,
+          options?: WebhookOptions,
+        ): Promise<void>[] | void {
+          const rawMsg =
+            update.message ??
+            update.edited_message ??
+            update.channel_post ??
+            update.edited_channel_post;
+          if (rawMsg) {
+            const topicWork = recordTelegramTopicFromRawMessage(rawMsg);
+            trackBackground(topicWork);
+            options?.waitUntil?.(topicWork);
+          }
+          const normalizedUpdate: TelegramUpdate = {
+            ...update,
+            ...(update.message ? { message: normalizeTopicMessage(update.message) } : {}),
+            ...(update.edited_message
+              ? { edited_message: normalizeTopicMessage(update.edited_message) }
+              : {}),
+            ...(update.channel_post
+              ? { channel_post: normalizeTopicMessage(update.channel_post) }
+              : {}),
+            ...(update.edited_channel_post
+              ? { edited_channel_post: normalizeTopicMessage(update.edited_channel_post) }
+              : {}),
+            ...(update.callback_query?.message
+              ? {
+                  callback_query: {
+                    ...update.callback_query,
+                    message: normalizeTopicMessage(update.callback_query.message),
+                  },
+                }
+              : {}),
+          };
+          return super.processUpdate(normalizedUpdate, options);
+        }
+
+        override parseMessage(raw: TelegramRawMessage): Message<TelegramRawMessage> {
+          return super.parseMessage(normalizeTopicMessage(raw));
+        }
+
         protected override isBotMentioned(message: TelegramMessage, text: string): boolean {
           return (
             super.isBotMentioned(message, text) ||

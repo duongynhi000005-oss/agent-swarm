@@ -3,6 +3,7 @@ import * as z from "zod";
 import { getAgentById, getWorkflow } from "@/be/db";
 import { CHAT_SDK_ADAPTER_NAMES } from "@/integrations/chat-sdk/config";
 import { errorMessage } from "@/integrations/chat-sdk/logger";
+import { validateTelegramThreadId } from "@/integrations/chat-sdk/outbound";
 import {
   type ChatChannelMapping,
   chatChannelKey,
@@ -52,6 +53,19 @@ export const registerRegisterChatChannelTool = (server: McpServer) => {
           .optional()
           .describe("Workflow whose webhook trigger receives the channel's messages."),
         name: z.string().max(200).optional().describe("Display name for the mapping."),
+        defaultThreadId: z
+          .string()
+          .min(1)
+          .optional()
+          .describe(
+            "Default thread/topic id (such as telegram:-100123:42) used when chat-post is called with only channelId.",
+          ),
+        topicPerTask: z
+          .boolean()
+          .optional()
+          .describe(
+            "Telegram forum groups only: when true, a new ask in General opens a dedicated forum topic per task.",
+          ),
       }),
       outputSchema: swarmToolOutputSchema({
         yourAgentId: z.string().optional(),
@@ -61,12 +75,17 @@ export const registerRegisterChatChannelTool = (server: McpServer) => {
             agentId: z.string().optional(),
             workflowId: z.string().optional(),
             name: z.string().optional(),
+            defaultThreadId: z.string().optional(),
+            topicPerTask: z.boolean().optional(),
             createdAt: z.string().optional(),
           })
           .optional(),
       }),
     },
-    async ({ adapter, channelId, agentId, workflowId, name }, requestInfo) => {
+    async (
+      { adapter, channelId, agentId, workflowId, name, defaultThreadId, topicPerTask },
+      requestInfo,
+    ) => {
       const data = { yourAgentId: requestInfo.agentId };
       try {
         if (!(await canManageChatChannels(requestInfo))) {
@@ -83,10 +102,33 @@ export const registerRegisterChatChannelTool = (server: McpServer) => {
         if (workflowId && !(await getWorkflow(workflowId))) {
           return toolErr(`Workflow ${workflowId} not found.`, { data });
         }
+        const normalizedChannelKey = chatChannelKey(adapter, channelId);
+        let normalizedDefaultThreadId: string | undefined;
+        if (defaultThreadId) {
+          const trimmed = defaultThreadId.trim();
+          normalizedDefaultThreadId =
+            adapter === "telegram" && !trimmed.includes(":")
+              ? `${normalizedChannelKey}:${trimmed}`
+              : chatChannelKey(adapter, trimmed);
+          if (adapter === "telegram") {
+            validateTelegramThreadId(normalizedDefaultThreadId);
+          }
+          if (
+            normalizedDefaultThreadId !== normalizedChannelKey &&
+            !normalizedDefaultThreadId.startsWith(`${normalizedChannelKey}:`)
+          ) {
+            return toolErr(
+              `defaultThreadId ${normalizedDefaultThreadId} does not belong to channel ${normalizedChannelKey}.`,
+              { data },
+            );
+          }
+        }
         const mapping: ChatChannelMapping = {
           ...(agentId ? { agentId } : {}),
           ...(workflowId ? { workflowId } : {}),
           ...(name ? { name } : {}),
+          ...(normalizedDefaultThreadId ? { defaultThreadId: normalizedDefaultThreadId } : {}),
+          ...(topicPerTask !== undefined ? { topicPerTask } : {}),
           createdAt: new Date().toISOString(),
         };
         const key = await putChatChannelMapping(adapter, channelId, mapping);

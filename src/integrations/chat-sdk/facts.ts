@@ -34,14 +34,17 @@ export interface TelegramRawMessage {
   message_id?: number;
   message_thread_id?: number;
   is_topic_message?: boolean;
-  chat?: { type?: string; title?: string; is_forum?: boolean };
+  chat?: { id?: number | string; type?: string; title?: string; is_forum?: boolean };
   from?: { first_name?: string; last_name?: string; username?: string };
+  forum_topic_created?: { name?: string };
+  forum_topic_edited?: { name?: string };
   reply_to_message?: {
     message_id?: number;
     from?: { id?: number | string };
     text?: string;
     caption?: string;
     forum_topic_created?: { name?: string };
+    forum_topic_edited?: { name?: string };
   };
 }
 
@@ -87,7 +90,12 @@ function telegramFacts(raw: TelegramRawMessage, message: Message, botUserId?: st
   const reply = raw.reply_to_message;
   const topicRoot = replyIsTopicRoot(raw);
   const realReply = reply && !topicRoot ? reply : undefined;
-  const topicName = topicRoot ? reply?.forum_topic_created?.name : undefined;
+  const topicName =
+    (topicRoot
+      ? (reply?.forum_topic_edited?.name ?? reply?.forum_topic_created?.name)
+      : undefined) ??
+    raw.forum_topic_edited?.name ??
+    raw.forum_topic_created?.name;
   const name = [raw.from?.first_name, raw.from?.last_name].filter(Boolean).join(" ").trim();
   return {
     chatType: raw.chat?.type,

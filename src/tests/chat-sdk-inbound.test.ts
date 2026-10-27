@@ -22,7 +22,11 @@ import { linkIdentity } from "../be/users";
 import { resetFileStorageProviderForTests } from "../fs/registry";
 import { drainBackground } from "../integrations/chat-sdk/background";
 import { CHAT_CHANNEL_SETTINGS_NAMESPACE } from "../integrations/chat-sdk/reactions";
-import { formatChatRelayText, formatChatTaskTag } from "../integrations/chat-sdk/relay";
+import {
+  formatChatRelayText,
+  formatChatTaskTag,
+  processPendingChatRelays,
+} from "../integrations/chat-sdk/relay";
 import { CHAT_CHANNELS_NAMESPACE, routeChatMessage } from "../integrations/chat-sdk/router";
 import { getChatInstance } from "../integrations/chat-sdk/runtime";
 import { isChatThreadBuffered } from "../integrations/chat-sdk/thread-buffer";
@@ -789,10 +793,119 @@ describe("Chat SDK requester and group addressing", () => {
       }),
     );
     await flushChatBuffers();
-    const tasks = await tasksIn();
+    const tasks = await chatTasks(chatId);
     expect(tasks).toHaveLength(1);
     expect(tasks[0]!.task).toStartWith(
       '[chat] telegram · supergroup "Life" · from: Alice (@alice) · addressed: reply-to-bot · reply-to: "Calendar sync is done."\n\n',
+    );
+  });
+
+  test("in a forum group with topicPerTask on, an ask in General opens a topic, steers inside it, and closes it when done", async () => {
+    const chatId = -3099;
+    await upsertKv({
+      namespace: CHAT_CHANNELS_NAMESPACE,
+      key: `telegram:${chatId}`,
+      value: { agentId: lead.id, topicPerTask: true },
+      valueType: "json",
+    });
+
+    await postTelegramUpdate(
+      telegramUpdate(group(chatId), "@swarm_test_bot book the flights to Tokyo", {
+        ...supergroup(chatId, "Ops Forum", { is_forum: true }),
+        ...ALICE,
+      }),
+    );
+    await flushChatBuffers();
+
+    const createdTopicCalls = harness.mock.calls.filter(
+      (call) =>
+        call.method === "createForumTopic" &&
+        String((call.body as { chat_id?: unknown }).chat_id) === String(chatId),
+    );
+    expect(createdTopicCalls).toHaveLength(1);
+    expect((createdTopicCalls[0]?.body as { name?: string }).name).toBe(
+      "book the flights to Tokyo",
+    );
+
+    const topicTasks = await getDbClient().query<{
+      id: string;
+      contextKey: string;
+      task: string;
+    }>("SELECT id, contextKey, task FROM agent_tasks WHERE source = 'chat' AND contextKey LIKE ?", [
+      `${chatSdkContextKey(`telegram:${chatId}`)}%3A%`,
+    ]);
+    expect(topicTasks).toHaveLength(1);
+    const topicTask = topicTasks[0]!;
+    const topicId = Number(decodeURIComponent(topicTask.contextKey).split(":").at(-1));
+    expect(Number.isInteger(topicId)).toBe(true);
+    expect(topicTask.task).toStartWith(
+      '[chat] telegram · supergroup "Ops Forum" · forum topic "book the flights to Tokyo" · from: Alice (@alice) · addressed: mention\n\n',
+    );
+
+    await startTask(topicTask.id);
+
+    // Follow-up in the created topic steers the same task.
+    await postTelegramUpdate(
+      telegramUpdate(group(chatId), "prefer morning departures", {
+        ...supergroup(chatId, "Ops Forum", { is_forum: true }),
+        ...ALICE,
+        is_topic_message: true,
+        message_thread_id: topicId,
+      }),
+    );
+    await flushChatBuffers();
+    expect(await steeringBodies(topicTask.id)).toEqual(["prefer morning departures"]);
+
+    // Mark the steering message consumed so completing the task finishes the topic's work.
+    await getDbClient().run(
+      "UPDATE task_steering_messages SET status = 'delivered' WHERE task_id = ?",
+      [topicTask.id],
+    );
+
+    // When the task completes and is relayed, the forum topic is closed.
+    await completeTask(topicTask.id, "Booked the 09:00 flight.");
+    await processPendingChatRelays();
+    const closeTopicCalls = harness.mock.calls.filter(
+      (call) =>
+        call.method === "closeForumTopic" &&
+        String((call.body as { chat_id?: unknown }).chat_id) === String(chatId) &&
+        Number((call.body as { message_thread_id?: unknown }).message_thread_id) === topicId,
+    );
+    expect(closeTopicCalls).toHaveLength(1);
+  });
+
+  test("a forum_topic_created service message caches the topic name for subsequent asks in that topic", async () => {
+    const chatId = -3098;
+    const topicId = 88;
+    await postTelegramUpdate(
+      telegramUpdate(group(chatId), "", {
+        ...supergroup(chatId, "Ops Forum", { is_forum: true }),
+        ...ALICE,
+        message_id: topicId,
+        message_thread_id: topicId,
+        is_topic_message: true,
+        forum_topic_created: { name: "Incident #42", icon_color: 0 },
+      }),
+    );
+
+    // A later message in the topic that replies to a normal message (no forum_topic_created on reply_to_message).
+    await postTelegramUpdate(
+      telegramUpdate(group(chatId), "@swarm_test_bot check the error rate", {
+        ...supergroup(chatId, "Ops Forum", { is_forum: true }),
+        ...ALICE,
+        is_topic_message: true,
+        message_thread_id: topicId,
+      }),
+    );
+    await flushChatBuffers();
+
+    const rows = await getDbClient().query<{ task: string }>(
+      "SELECT task FROM agent_tasks WHERE source = 'chat' AND contextKey = ?",
+      [chatSdkContextKey(`telegram:${chatId}:${topicId}`)],
+    );
+    expect(rows).toHaveLength(1);
+    expect(rows[0]!.task).toStartWith(
+      '[chat] telegram · supergroup "Ops Forum" · forum topic "Incident #42" · from: Alice (@alice) · addressed: mention\n\n',
     );
   });
 

@@ -23,6 +23,7 @@ import { scrubSecrets } from "@/utils/secret-scrubber";
 import { getExecutorRegistry } from "@/workflows";
 import { workflowEventBus } from "@/workflows/event-bus";
 import { handleWebhookTrigger } from "@/workflows/triggers";
+import { resolveAdapterApiUrl } from "./adapters";
 import {
   buildChatAttachmentText,
   createChatTaskWithFiles,
@@ -53,6 +54,13 @@ import {
 import { getChatInstance } from "./runtime";
 import { readPersistedThreadHistory, SqliteChatState } from "./state";
 import { formatChatSteeringAck, requestChatThreadSteering } from "./steering";
+import {
+  createForumTopic,
+  getTelegramTopicRecord,
+  parseTelegramTopicThreadId,
+  recordTelegramTopicFromRawMessage,
+  resolveTelegramBotToken,
+} from "./telegram-api";
 import {
   bufferChatMessage,
   type ChatBufferedMessage,
@@ -128,6 +136,17 @@ export async function handleChatInbound(
   const attachments = message.attachments ?? [];
 
   const facts = readChatMessageFacts(thread, message);
+  if (adapter === "telegram") {
+    await recordTelegramTopicFromRawMessage(message.raw);
+    const parsedTopic = parseTelegramTopicThreadId(thread.id);
+    if (parsedTopic && (!facts.topic || facts.topic.startsWith("#"))) {
+      const cachedTopic = await getTelegramTopicRecord(parsedTopic.chatId, parsedTopic.topicId);
+      if (cachedTopic?.name) {
+        facts.topic = `"${cachedTopic.name}"`;
+        facts.isForum ??= true;
+      }
+    }
+  }
   const isDirectMessage = kind === "dm" || thread.isDM;
   const mentioned = kind === "mention" || message.isMention === true;
   let addressed: ChatAddressedReason = isDirectMessage
@@ -390,6 +409,27 @@ function chatSourceLabel(adapter: string, item: ChatBufferedMessage): string | u
   return undefined;
 }
 
+async function openTaskForumTopic(
+  channelId: string,
+  title: string,
+): Promise<{ threadId: string; name: string } | null> {
+  try {
+    const token = await resolveTelegramBotToken();
+    if (!token) return null;
+    const chatId = channelId.replace(/^telegram:/, "");
+    const created = await createForumTopic(resolveAdapterApiUrl("telegram"), token, chatId, title);
+    return {
+      threadId: `telegram:${chatId}:${created.messageThreadId}`,
+      name: created.name,
+    };
+  } catch (error) {
+    console.warn(
+      `[chat-sdk] ${channelId}: could not create forum topic for task: ${errorMessage(error)}`,
+    );
+    return null;
+  }
+}
+
 export async function flushChatThread(
   threadId: string,
   items: ChatBufferedMessage[],
@@ -507,16 +547,45 @@ export async function flushChatThread(
   }
 
   const body = stripRoutingTokens(rawText);
+  let activeThreadId = threadId;
+  let activeContextKey = contextKey;
+  let activeThread = thread;
+  let activeMostRecentTask = mostRecentTask;
+  let requesterFacts = requester.facts;
+  if (
+    adapter === "telegram" &&
+    items.some((item) => item.facts.isForum === true) &&
+    !parseTelegramTopicThreadId(threadId) &&
+    (await getChatChannelMapping(adapter, first.channelId))?.topicPerTask === true
+  ) {
+    const opened = await openTaskForumTopic(first.channelId, body || rawText || "Task");
+    if (opened) {
+      stopTypingKeepalive(threadId);
+      activeThreadId = opened.threadId;
+      activeContextKey = chatSdkContextKey(activeThreadId);
+      activeThread = getChatInstance(adapter)?.thread(activeThreadId);
+      activeMostRecentTask = null;
+      requesterFacts = {
+        ...requester.facts,
+        isForum: true,
+        topic: `"${opened.name}"`,
+      };
+    }
+  }
   const files = items.flatMap((item) => toChatFiles(adapter, item.messageId, item.attachments));
   await using inbound = await fetchChatFiles(files);
   const tooLarge = inbound.failed.filter((failure) => failure.tooLarge);
   if (tooLarge.length > 0) {
     // The user would otherwise never learn the file was dropped.
     try {
-      await postChatMessage({ adapter, threadId, text: formatTooLargeReply(tooLarge) });
+      await postChatMessage({
+        adapter,
+        threadId: activeThreadId,
+        text: formatTooLargeReply(tooLarge),
+      });
     } catch (error) {
       console.warn(
-        `[chat-sdk] ${threadId}: could not post the too-large reply: ${errorMessage(error)}`,
+        `[chat-sdk] ${activeThreadId}: could not post the too-large reply: ${errorMessage(error)}`,
       );
     }
   }
@@ -528,15 +597,19 @@ export async function flushChatThread(
       ? `[Thread follow-up: ${items.length} message(s) buffered]\n\n${combined}`
       : combined;
   const threadContext =
-    mostRecentTask && thread
-      ? await getChatThreadContext(thread, new Set(items.map((item) => item.messageId)), resetAt)
+    activeMostRecentTask && activeThread
+      ? await getChatThreadContext(
+          activeThread,
+          new Set(items.map((item) => item.messageId)),
+          resetAt,
+        )
       : "";
   const header = resolveTemplate("chat.message.header", {
     chat_facts: formatChatHeaderFacts(
       adapter,
       otherSenders > 0
-        ? { ...requester.facts, from: `${requester.facts.from} +${otherSenders} more` }
-        : requester.facts,
+        ? { ...requesterFacts, from: `${requesterFacts.from} +${otherSenders} more` }
+        : requesterFacts,
       requester.addressed,
     ),
   }).text;
@@ -552,7 +625,7 @@ export async function flushChatThread(
   const requestedByUserId =
     otherSenders > 0 ? undefined : await resolveChatRequester(adapter, requester);
 
-  const latestActive = await getLatestActiveTaskByContextKey(contextKey, "chat");
+  const latestActive = await getLatestActiveTaskByContextKey(activeContextKey, "chat");
   const dependsOn = !immediate && latestActive ? [latestActive.id] : undefined;
   let created = 0;
   let sourceKey: string | null = null;
@@ -565,10 +638,10 @@ export async function flushChatThread(
       taskType: "chat-inbound",
       tags: ["chat-sdk", adapter],
       priority: 70,
-      contextKey,
+      contextKey: activeContextKey,
       dependsOn,
       requestedByUserId,
-      parentTaskId: mostRecentTask?.id,
+      parentTaskId: activeMostRecentTask?.id,
       // The parent's requester asked an earlier message: an unknown sender stays unattributed.
       inheritParentRequester: false,
       // A human message in the thread: never answer it in the previous task's
@@ -585,15 +658,15 @@ export async function flushChatThread(
       sourceKey ??= sessionSourceKey(task);
       created++;
       console.log(
-        `[chat-sdk] ${threadId}: task ${task.id} for ${match.agent ? `agent ${match.agent.id}` : "no agent (queued)"} (${match.matchedText}, dependsOn: ${dependsOn?.join(", ") ?? "none"}${unattached.length ? `, ${unattached.length} file(s) not attached` : ""})`,
+        `[chat-sdk] ${activeThreadId}: task ${task.id} for ${match.agent ? `agent ${match.agent.id}` : "no agent (queued)"} (${match.matchedText}, dependsOn: ${dependsOn?.join(", ") ?? "none"}${unattached.length ? `, ${unattached.length} file(s) not attached` : ""})`,
       );
     } catch (error) {
       if (error instanceof TaskCreationBlockedError) {
         console.info(
-          `[chat-sdk] ${threadId}: task creation blocked: ${scrubSecrets(error.reason)}`,
+          `[chat-sdk] ${activeThreadId}: task creation blocked: ${scrubSecrets(error.reason)}`,
         );
       } else {
-        console.error(`[chat-sdk] ${threadId}: task creation failed: ${errorMessage(error)}`);
+        console.error(`[chat-sdk] ${activeThreadId}: task creation failed: ${errorMessage(error)}`);
       }
     }
   }
@@ -606,10 +679,10 @@ export async function flushChatThread(
     });
   }
   if (created > 0) {
-    await rememberChatThreadRequester(threadId, requester.userId);
-    await subscribe(thread);
+    await rememberChatThreadRequester(activeThreadId, requester.userId);
+    await subscribe(activeThread);
     // Unaddressed subscribed-thread messages start typing only here, once a task exists.
-    startTypingKeepalive(adapter, threadId);
+    startTypingKeepalive(adapter, activeThreadId);
     await clearChatMessageReactions(
       adapter,
       threadId,
@@ -618,7 +691,7 @@ export async function flushChatThread(
     if (!answered.reacted)
       await setChatMessageReaction(adapter, threadId, answered.messageId, "accepted");
   } else {
-    stopTypingKeepalive(threadId);
+    stopTypingKeepalive(activeThreadId);
     await clearChatMessageReactions(adapter, threadId, reacted);
   }
 }

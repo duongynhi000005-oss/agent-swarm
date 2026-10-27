@@ -93,6 +93,12 @@ function resultFor(
       return TELEGRAM_MOCK_BOT;
     case "getWebhookInfo":
       return { url: webhook.url, has_custom_certificate: false, pending_update_count: 0 };
+    case "createForumTopic":
+      return {
+        message_thread_id: nextMessageId++,
+        name: String(body.name ?? ""),
+        icon_color: 0,
+      };
     case "sendMessage":
     case "sendRichMessage":
       return {

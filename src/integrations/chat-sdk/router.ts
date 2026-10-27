@@ -19,6 +19,10 @@ export interface ChatChannelMapping {
   agentId?: string;
   workflowId?: string;
   name?: string;
+  /** Default topic/thread id (such as `telegram:-100123:42`) used when `chat-post` is called with only `channelId`. */
+  defaultThreadId?: string;
+  /** When true on a Telegram forum group, a new ask in General opens a forum topic named after the ask. */
+  topicPerTask?: boolean;
   createdAt?: string;
 }
 
