@@ -16,6 +16,7 @@ const traitsSchema = z.object({
   canProvision: z.boolean(),
   ephemeralDisk: z.boolean(),
   supportsPause: z.boolean(),
+  persistentCache: z.boolean().optional(),
   maxTtlSec: z.number().positive().optional(),
   maxContinuousSec: z.number().positive().optional(),
 });
@@ -30,6 +31,7 @@ const provisionSchema = z.object({
   resources: z
     .object({ cpu: z.number().positive().optional(), memoryMb: z.number().positive().optional() })
     .optional(),
+  cache: z.object({ key: z.string().min(1), mountPath: z.string().min(1) }).optional(),
   ttlSec: z.number().positive().optional(),
 });
 const command = { type: z.literal("cmd"), id: z.string().min(1) };

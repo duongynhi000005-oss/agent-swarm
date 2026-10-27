@@ -255,6 +255,9 @@ export async function provisionRuntime(
       ...(ttlSec === undefined ? {} : { ttlSec }),
       env,
       resources: pool.resources ?? undefined,
+      ...(pool.cache
+        ? { cache: { key: `swarm-cache-${pool.id}`, mountPath: pool.cache.mountPath } }
+        : {}),
       labels: {
         [RUNTIME_LABELS.runtimeId]: runtimeId,
         [RUNTIME_LABELS.poolId]: pool.id,

@@ -272,4 +272,58 @@ describe("runtime pools persistence", () => {
       status: 409,
     });
   });
+  test("persists cache mountPath on docker pools and rejects unsupported providers or invalid mountPaths", async () => {
+    const dockerController = await createRuntimeController({ name: "docker", kind: "docker" });
+    const e2bController = await createRuntimeController({ name: "e2b", kind: "e2b" });
+    const staticController = await createRuntimeController({ name: "static", kind: "static" });
+
+    const pool = await createRuntimePool({
+      name: "docker-cached",
+      kind: "docker",
+      placements: [dockerController.id],
+      image: "worker:latest",
+      cache: { mountPath: "/cache" },
+    });
+    expect(pool.cache).toEqual({ mountPath: "/cache" });
+    expect((await getRuntimePool(pool.id))?.cache).toEqual({ mountPath: "/cache" });
+
+    const cleared = await updateRuntimePool(pool.id, { cache: null });
+    expect(cleared.cache).toBeNull();
+
+    const restored = await updateRuntimePool(pool.id, {
+      cache: { mountPath: "/workspace/.cache" },
+    });
+    expect(restored.cache).toEqual({ mountPath: "/workspace/.cache" });
+
+    for (const badPath of ["", "/", "relative/cache"]) {
+      await expect(
+        createRuntimePool({
+          name: `bad-${badPath}`,
+          kind: "docker",
+          placements: [dockerController.id],
+          image: "worker:latest",
+          cache: { mountPath: badPath },
+        }),
+      ).rejects.toMatchObject({ status: 400 });
+    }
+
+    await expect(
+      createRuntimePool({
+        name: "e2b-cached",
+        kind: "e2b",
+        placements: [e2bController.id],
+        image: "worker-tpl",
+        cache: { mountPath: "/cache" },
+      }),
+    ).rejects.toMatchObject({ status: 400 });
+
+    await expect(
+      createRuntimePool({
+        name: "static-cached",
+        kind: "static",
+        placements: [staticController.id],
+        cache: { mountPath: "/cache" },
+      }),
+    ).rejects.toMatchObject({ status: 400 });
+  });
 });

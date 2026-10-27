@@ -653,6 +653,8 @@ describe("script connections", () => {
       markMigrationApplied(database, "241_skills_meta_fts.sql");
       // 244 alters api_key_status, which this migration-112-only fixture does not create.
       markMigrationApplied(database, "244_api_key_validation.sql");
+      // 245 alters runtime_pools, which this migration-112-only fixture does not create.
+      markMigrationApplied(database, "245_runtime_pool_cache.sql");
 
       const id = crypto.randomUUID();
       const now = new Date().toISOString();

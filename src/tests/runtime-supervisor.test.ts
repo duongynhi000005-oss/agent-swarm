@@ -53,7 +53,12 @@ import { registerVolatileSecret, scrubSecrets } from "../utils/secret-scrubber";
 
 class FakeRuntimeProvider implements RuntimeProvider {
   readonly kind = "docker" as const;
-  readonly traits = { canProvision: true, ephemeralDisk: true, supportsPause: false };
+  readonly traits = {
+    canProvision: true,
+    ephemeralDisk: true,
+    supportsPause: false,
+    persistentCache: true,
+  };
   requests: ProvisionRequest[] = [];
   targets: RuntimeTargetConfig[] = [];
   terminated: string[] = [];
@@ -1036,4 +1041,13 @@ test("per-task runtime survives offer review before a real task finishes", async
   await completeTask(task.id, "done");
   await reconcileOnce();
   expect((await getRuntimeInstanceById(runtime.id))?.status).toBe("active");
+});
+
+test("forwards swarm-cache-<pool.id> mount when pool.cache is configured", async () => {
+  const { pool } = await wake({ cache: { mountPath: "/cache" } });
+  expect(fake.requests).toHaveLength(1);
+  expect(fake.requests[0]?.cache).toEqual({
+    key: `swarm-cache-${pool.id}`,
+    mountPath: "/cache",
+  });
 });

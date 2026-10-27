@@ -3736,6 +3736,9 @@
     "resources": {
       "exempt": "JSON resource settings"
     },
+    "cache": {
+      "exempt": "JSON cache settings"
+    },
     "resolved_image": {
       "exempt": "provider artifact reference"
     },

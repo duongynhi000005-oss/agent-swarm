@@ -119,7 +119,12 @@ async function dockerApi<T>(
 
 export class DockerRuntimeProvider implements RuntimeProvider {
   readonly kind = "docker" as const;
-  readonly traits = { canProvision: true, ephemeralDisk: true, supportsPause: false };
+  readonly traits = {
+    canProvision: true,
+    ephemeralDisk: true,
+    supportsPause: false,
+    persistentCache: true,
+  };
 
   checkConfig(target: RuntimeTargetConfig): ConfigStatus {
     try {
@@ -154,6 +159,17 @@ export class DockerRuntimeProvider implements RuntimeProvider {
           NetworkMode: target.DOCKER_NETWORK,
           Memory: req.resources?.memoryMb ? req.resources.memoryMb * 1024 * 1024 : undefined,
           NanoCpus: req.resources?.cpu ? Math.round(req.resources.cpu * 1e9) : undefined,
+          ...(req.cache
+            ? {
+                Mounts: [
+                  {
+                    Type: "volume",
+                    Source: req.cache.key,
+                    Target: req.cache.mountPath,
+                  },
+                ],
+              }
+            : {}),
         },
       };
       let created: { Id: string };

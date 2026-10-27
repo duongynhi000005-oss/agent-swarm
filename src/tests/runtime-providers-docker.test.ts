@@ -399,4 +399,19 @@ describe("Docker runtime provider", () => {
     ).rejects.toThrow("only supports unix sockets");
     expect(calls).toHaveLength(0);
   });
+
+  test("attaches a named volume mount when req.cache is present", async () => {
+    expect(provider.traits.persistentCache).toBe(true);
+    await provider.provision(target, {
+      ...request,
+      cache: { key: "swarm-cache-pool-1", mountPath: "/cache" },
+    });
+    expect(JSON.parse(String(calls[0]?.init.body)).HostConfig.Mounts).toEqual([
+      {
+        Type: "volume",
+        Source: "swarm-cache-pool-1",
+        Target: "/cache",
+      },
+    ]);
+  });
 });

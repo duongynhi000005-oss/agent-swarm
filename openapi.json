@@ -6035,6 +6035,23 @@
             "default": null,
             "additionalProperties": false
           },
+          "cache": {
+            "type": [
+              "object",
+              "null"
+            ],
+            "properties": {
+              "mountPath": {
+                "type": "string",
+                "minLength": 1
+              }
+            },
+            "default": null,
+            "required": [
+              "mountPath"
+            ],
+            "additionalProperties": false
+          },
           "ttlSec": {
             "type": [
               "integer",
@@ -64727,6 +64744,23 @@
                     "default": null,
                     "additionalProperties": false
                   },
+                  "cache": {
+                    "type": [
+                      "object",
+                      "null"
+                    ],
+                    "properties": {
+                      "mountPath": {
+                        "type": "string",
+                        "minLength": 1
+                      }
+                    },
+                    "default": null,
+                    "required": [
+                      "mountPath"
+                    ],
+                    "additionalProperties": false
+                  },
                   "ttlSec": {
                     "type": [
                       "integer",
@@ -65006,6 +65040,22 @@
                         "exclusiveMinimum": 0
                       }
                     },
+                    "additionalProperties": false
+                  },
+                  "cache": {
+                    "type": [
+                      "object",
+                      "null"
+                    ],
+                    "properties": {
+                      "mountPath": {
+                        "type": "string",
+                        "minLength": 1
+                      }
+                    },
+                    "required": [
+                      "mountPath"
+                    ],
                     "additionalProperties": false
                   },
                   "ttlSec": {
