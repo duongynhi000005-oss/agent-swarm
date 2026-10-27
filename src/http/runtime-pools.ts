@@ -32,10 +32,9 @@ import {
   RuntimePoolSchema,
   RuntimePoolUpdateSchema,
 } from "../types";
-import { getRequestAuth } from "../utils/request-auth-context";
 import { isRuntimePoolsEnabled } from "../utils/runtime-pools-flag";
 import { scrubSecrets } from "../utils/secret-scrubber";
-import { agentFirstPrincipal } from "./request-principal";
+import { agentFirstPrincipal, requireAuthKind } from "./request-principal";
 import { route } from "./route-def";
 import { jsonError } from "./utils";
 
@@ -344,9 +343,14 @@ export async function handleRuntimePools(
   }
   try {
     if (matched === controllerTokenRoute) {
-      const auth = getRequestAuth(req);
-      if (auth?.kind !== "operator" && auth?.kind !== "user") {
-        jsonError(res, "Controller tokens require operator or user credentials", 403);
+      if (
+        !requireAuthKind(
+          req,
+          res,
+          ["operator", "user"],
+          "Controller tokens require operator or user credentials",
+        )
+      ) {
         return true;
       }
     }

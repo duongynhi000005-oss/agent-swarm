@@ -20,7 +20,7 @@ import { attachmentContentDisposition } from "../utils/content-disposition";
 import { getCurrentRequestAuth } from "../utils/request-auth-context";
 import { scrubSecrets } from "../utils/secret-scrubber";
 import { transcribeAudioNotes } from "../utils/transcription";
-import { requestPrincipal } from "./request-principal";
+import { authUserId, requestPrincipal } from "./request-principal";
 import { route } from "./route-def";
 import { canReadSession, SESSION_READ_DENIED } from "./session-access";
 import { BODY_TOO_LARGE, enforceContentLengthCap, jsonError } from "./utils";
@@ -430,7 +430,7 @@ async function sendUpload(
     intent: query.intent,
     description: query.description,
     isPrimary: query.isPrimary === "true",
-    createdBy: auth?.kind === "user" ? auth.userId : undefined,
+    createdBy: authUserId(auth),
   });
   const mimeType = contentType.split(";")[0]!.trim().toLowerCase();
   if (isDraft && mimeType.startsWith("audio/")) {

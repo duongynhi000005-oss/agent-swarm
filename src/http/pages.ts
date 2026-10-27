@@ -39,6 +39,7 @@ import { getNodeEnv } from "../utils/node-env";
 import { pageSessionSetCookies } from "../utils/page-session";
 import { getRequestAuth } from "../utils/request-auth-context";
 import { resolveHttpFavoriteOwner } from "./favorite-owner";
+import { authUser, isOperatorAuth } from "./request-principal";
 import { route } from "./route-def";
 import { resolveTaskRequester } from "./tasks";
 import {
@@ -975,12 +976,12 @@ export async function handlePages(
     // user identity when a user-bound bearer launched it. Operator sessions
     // receive a guest handle, while password sessions remain anonymous.
     const auth = getRequestAuth(req);
-    const identity =
-      auth?.kind === "user"
-        ? { uid: auth.userId, name: auth.user.name }
-        : auth?.kind === "operator"
-          ? { name: `guest-${randomUUID().slice(0, 8)}`, op: true as const }
-          : undefined;
+    const user = authUser(auth);
+    const identity = user
+      ? { uid: user.id, name: user.name }
+      : isOperatorAuth(auth)
+        ? { name: `guest-${randomUUID().slice(0, 8)}`, op: true as const }
+        : undefined;
     const cookies = await pageSessionSetCookies(req, page.id, {
       dev: isDevRequest(req),
       ...identity,

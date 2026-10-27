@@ -44,6 +44,7 @@ import {
 } from "../workflows/approval-notifications";
 import { workflowEventBus } from "../workflows/event-bus";
 import { ensureConfigAdmin, runConfigWriteSideEffects } from "./config";
+import { agentFirstPrincipal, authUser, authUserId } from "./request-principal";
 import { bodyTask, route } from "./route-def";
 import { jsonError } from "./utils";
 
@@ -584,9 +585,9 @@ export async function handleApprovalRequests(
       if (!(await ensureConfigAdmin(req, res, "config.write.any"))) return true;
       // Admission only checked `approval.respond`; `ensureConfigAdmin` passes
       // every user, so check the config write grant here as PUT /api/config would.
-      const auth = getRequestAuth(req);
-      if (auth?.kind === "user" && isRbacEnabled()) {
-        const grant = await getUserGrant(auth.userId);
+      const userId = authUserId(getRequestAuth(req));
+      if (userId && isRbacEnabled()) {
+        const grant = await getUserGrant(userId);
         if (!grant.grantsAll && !grant.verbs.has("config.write.any")) {
           jsonError(res, "Forbidden: setting a config value needs 'config.write.any'", 403);
           return true;
@@ -814,9 +815,8 @@ export async function handleApprovalRequests(
     const rawCallerAgentId = req.headers["x-agent-id"];
     const callerAgentId = Array.isArray(rawCallerAgentId) ? rawCallerAgentId[0] : rawCallerAgentId;
     const createdBy =
-      auth?.kind === "user"
-        ? auth.userId
-        : ((await resolveTaskAuditUserId(parsed.body.sourceTaskId, callerAgentId)) ?? undefined);
+      authUserId(auth) ??
+      ((await resolveTaskAuditUserId(parsed.body.sourceTaskId, callerAgentId)) ?? undefined);
     const request = await createApprovalRequest({
       id,
       title: parsed.body.title,
@@ -894,22 +894,16 @@ const SLACK_NOTIFICATION_REFUSED =
 async function approvalCallerPrincipal(
   req: IncomingMessage,
 ): Promise<{ principal: RbacPrincipal; resolvedBy: string | null }> {
-  const auth = getRequestAuth(req);
-  if (auth?.kind === "user") {
-    return { principal: { kind: "user", userId: auth.userId }, resolvedBy: auth.userId };
-  }
-  const rawAgentId = req.headers["x-agent-id"];
-  const agentId =
-    auth?.kind === "agent" ? auth.agentId : Array.isArray(rawAgentId) ? rawAgentId[0] : rawAgentId;
-  if (auth?.kind === "guest") return { principal: { kind: "guest" }, resolvedBy: null };
-  if (agentId) {
-    const agent = await getAgentById(agentId);
-    return {
-      principal: { kind: "agent", agentId, isLead: agent?.isLead ?? false },
-      resolvedBy: agentId,
-    };
-  }
-  return { principal: { kind: "operator" }, resolvedBy: "operator" };
+  const principal = await agentFirstPrincipal(req);
+  const resolvedBy =
+    principal.kind === "user"
+      ? principal.userId
+      : principal.kind === "agent"
+        ? principal.agentId || null
+        : principal.kind === "operator"
+          ? "operator"
+          : null;
+  return { principal, resolvedBy };
 }
 
 type ApprovalResponder = { kind: "user"; user: User } | { kind: "operator" };
@@ -928,30 +922,17 @@ async function approvalResponder(
   req: IncomingMessage,
 ): Promise<{ ok: true; responder: ApprovalResponder } | { ok: false; message: string }> {
   const auth = getRequestAuth(req);
-  const rawAgentId = req.headers["x-agent-id"];
-  const headerAgentId = Array.isArray(rawAgentId) ? rawAgentId[0] : rawAgentId;
-
-  let principal: RbacPrincipal;
-  let responder: ApprovalResponder | null = null;
-  if (auth?.kind === "user") {
-    principal = { kind: "user", userId: auth.userId };
-    responder = { kind: "user", user: auth.user };
-  } else if (auth?.kind === "agent" || headerAgentId) {
-    const agentId = auth?.kind === "agent" ? auth.agentId : (headerAgentId ?? "");
-    const agent = agentId ? await getAgentById(agentId) : null;
-    principal = { kind: "agent", agentId, isLead: agent?.isLead ?? false };
-  } else if (auth?.page) {
+  const principal = await agentFirstPrincipal(req);
+  if (principal.kind !== "user" && principal.kind !== "agent" && auth?.page) {
     return {
       ok: false,
       message: "A page session without a signed-in user cannot answer approval requests.",
     };
-  } else {
-    principal = { kind: "operator" };
-    responder = { kind: "operator" };
   }
-
   const decision = can({ principal, verb: "approval.respond", source: "http" });
-  if (!decision.allow || !responder) return { ok: false, message: AGENT_RESPONSE_REFUSED };
+  if (!decision.allow) return { ok: false, message: AGENT_RESPONSE_REFUSED };
+  const user = authUser(auth);
+  const responder: ApprovalResponder = user ? { kind: "user", user } : { kind: "operator" };
   return { ok: true, responder };
 }
 

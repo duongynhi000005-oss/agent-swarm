@@ -62,6 +62,7 @@ import { getRequestAuth } from "../utils/request-auth-context";
 import { resolveAppUrl, resolveMcpBaseUrl } from "./config-values";
 import { clientIp, createIpRateLimiter } from "./ip-rate-limit";
 import { getOperatorActor } from "./operator-actor";
+import { authUser } from "./request-principal";
 import { route } from "./route-def";
 import { jsonError } from "./utils";
 
@@ -693,9 +694,9 @@ export async function handleUsers(
   if (whoamiRoute.match(req.method, pathSegments)) {
     const parsed = await whoamiRoute.parse(req, res, pathSegments, queryParams);
     if (!parsed) return true;
-    const auth = getRequestAuth(req);
-    if (auth?.kind === "user") {
-      whoamiRoute.respond(res, 200, { kind: "user", user: auth.user });
+    const user = authUser(getRequestAuth(req));
+    if (user) {
+      whoamiRoute.respond(res, 200, { kind: "user", user });
     } else {
       whoamiRoute.respond(res, 200, { kind: "operator", user: null });
     }

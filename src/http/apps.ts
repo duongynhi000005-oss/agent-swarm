@@ -69,7 +69,7 @@ import { AgentTaskStatusSchema } from "../types";
 import { getRequestAuth } from "../utils/request-auth-context";
 import { scrubObject } from "../utils/secret-scrubber";
 import { resolveHttpFavoriteOwner } from "./favorite-owner";
-import { agentFirstPrincipal } from "./request-principal";
+import { agentFirstPrincipal, authUser, requestPrincipal } from "./request-principal";
 import { bodyTask, route } from "./route-def";
 import { denyParentAttach } from "./session-access";
 import { BODY_TOO_LARGE, enforceContentLengthCap, json, jsonError } from "./utils";
@@ -680,41 +680,41 @@ async function authorizeAppCaller(
   resource: RbacResource,
 ): Promise<{ actor: string; caller: AppActionCaller } | null> {
   const auth = getRequestAuth(req);
-  let principal: RbacPrincipal;
-  let actor: string;
-  let caller: AppActionCaller;
-  if (auth?.kind === "operator") {
-    principal = { kind: "operator" };
-    // Page sessions never act as an agent, even if a header names one.
-    const agent = myAgentId && !auth.page ? await getAgentById(myAgentId) : null;
-    actor = agent ? `agent:${agent.id}` : "operator";
-    caller = agent
-      ? { kind: "agent", id: agent.id, name: agent.name }
-      : { kind: "operator", id: null };
-  } else if (auth?.kind === "user") {
-    principal = { kind: "user", userId: auth.userId };
-    actor = `user:${auth.userId}`;
-    caller = { kind: "user", id: auth.userId, name: auth.user.name };
-  } else if (auth?.kind === "guest" || auth?.kind === "controller") {
-    principal = { kind: "guest" };
-    actor = "guest";
-    caller = { kind: "guest", id: null };
-  } else {
-    const agent = myAgentId ? await getAgentById(myAgentId) : null;
-    principal = { kind: "agent", agentId: myAgentId ?? "", isLead: agent?.isLead ?? false };
-    actor = myAgentId ? `agent:${myAgentId}` : "agent";
-    caller = { kind: "agent", id: myAgentId ?? null, name: agent?.name };
-  }
-  if (auth?.page) caller.pageId = auth.page.id;
+  const principal: RbacPrincipal = (await requestPrincipal(req, myAgentId)) ?? {
+    kind: "agent",
+    agentId: "",
+    isLead: false,
+  };
   const decision = can({
     principal,
     verb,
     resource,
     source: "http",
   });
-  if (decision.allow) return { actor, caller };
-  jsonError(res, decision.reason, 403);
-  return null;
+  if (!decision.allow) {
+    jsonError(res, decision.reason, 403);
+    return null;
+  }
+  let actor: string;
+  let caller: AppActionCaller;
+  if (principal.kind === "operator") {
+    // Page sessions never act as an agent, even if a header names one.
+    const agent = myAgentId && !auth?.page ? await getAgentById(myAgentId) : null;
+    actor = agent ? `agent:${agent.id}` : "operator";
+    caller = agent
+      ? { kind: "agent", id: agent.id, name: agent.name }
+      : { kind: "operator", id: null };
+  } else if (principal.kind === "user") {
+    actor = `user:${principal.userId}`;
+    caller = { kind: "user", id: principal.userId, name: authUser(auth)?.name };
+  } else {
+    const agentId = principal.kind === "agent" ? principal.agentId : "";
+    const agent = agentId ? await getAgentById(agentId) : null;
+    actor = agentId ? `agent:${agentId}` : "agent";
+    caller = { kind: "agent", id: agentId || null, name: agent?.name };
+  }
+  if (auth?.page) caller.pageId = auth.page.id;
+  return { actor, caller };
 }
 
 async function authorizeApp(

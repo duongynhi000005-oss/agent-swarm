@@ -29,6 +29,7 @@ import {
 } from "../rbac";
 import { AgentMcpServerSchema, McpServerSchema, McpServerWithInstallInfoSchema } from "../types";
 import { getRequestAuth } from "../utils/request-auth-context";
+import { agentFirstPrincipal, authUserId } from "./request-principal";
 import { route } from "./route-def";
 import { jsonError } from "./utils";
 
@@ -210,12 +211,12 @@ const getAgentMcpServersRoute = route({
 // ─── Handler ─────────────────────────────────────────────────────────────────
 
 async function canResolveMcpSecretsForHttpUser(req: IncomingMessage): Promise<boolean> {
-  const auth = getRequestAuth(req);
-  if (auth?.kind !== "user") return true;
+  const userId = authUserId(getRequestAuth(req));
+  if (!userId) return true;
   if (!isRbacEnabled()) return true;
 
   const verb: PermissionVerb = "mcp-server.read.secrets";
-  const grant = await getUserGrant(auth.userId);
+  const grant = await getUserGrant(userId);
   const decision =
     grant.grantsAll || grant.verbs.has(verb)
       ? ({ allow: true, verb } as const)
@@ -225,17 +226,12 @@ async function canResolveMcpSecretsForHttpUser(req: IncomingMessage): Promise<bo
           verb,
         } as const);
   enqueueAdmissionRow({
-    userId: auth.userId,
+    userId,
     decision,
     method: req.method,
     route: getAgentMcpServersRoute.def.path,
   });
   return decision.allow;
-}
-
-function singleHeader(req: IncomingMessage, name: string): string | undefined {
-  const raw = req.headers[name];
-  return Array.isArray(raw) ? raw[0] : raw;
 }
 
 /**
@@ -244,17 +240,7 @@ function singleHeader(req: IncomingMessage, name: string): string | undefined {
  * cannot use that key to bypass the route's declared RBAC permission.
  */
 async function mcpServerPrincipal(req: IncomingMessage): Promise<RbacPrincipal> {
-  const agentId = singleHeader(req, "x-agent-id");
-  if (agentId) {
-    const agent = await getAgentById(agentId);
-    return { kind: "agent", agentId, isLead: agent?.isLead ?? false };
-  }
-
-  const auth = getRequestAuth(req);
-  if (auth?.kind === "operator") return { kind: "operator" };
-  if (auth?.kind === "user") return { kind: "user", userId: auth.userId };
-  if (auth?.kind === "guest") return { kind: "guest" };
-  return { kind: "agent", agentId: "", isLead: false };
+  return agentFirstPrincipal(req, undefined, { fallback: "anonymous-agent" });
 }
 
 type McpServerVerb = Extract<

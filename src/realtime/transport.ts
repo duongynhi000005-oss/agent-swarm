@@ -5,6 +5,7 @@ import { z } from "zod";
 import { getPage } from "../be/db";
 import { findUserById } from "../be/users";
 import { resolveHttpRequestAuth } from "../http/auth";
+import { authUser, isOperatorAuth } from "../http/request-principal";
 import { getApiKey } from "../utils/api-key";
 import { extractAndVerifyCookie } from "../utils/page-session";
 import type { HttpRequestAuth } from "../utils/request-auth-context";
@@ -90,49 +91,47 @@ function identityFromHttpAuth(
   auth: HttpRequestAuth & { dashboardUserId?: string },
 ): AuthenticatedConnection {
   if (auth.kind === "controller") throw new Error("Controller tokens cannot use realtime");
-  if (auth.kind === "agent") {
+  const agentAuth = auth.kind === "agent" ? auth : undefined;
+  if (agentAuth) {
     const agentId = header(req, "x-agent-id");
     const runtimeId = header(req, "x-runtime-instance-id");
-    if (agentId !== undefined && agentId !== auth.agentId)
+    if (agentId !== undefined && agentId !== agentAuth.agentId)
       throw new Error("X-Agent-ID does not match token");
-    if (auth.runtimeId && runtimeId !== undefined && runtimeId !== auth.runtimeId)
+    if (agentAuth.runtimeId && runtimeId !== undefined && runtimeId !== agentAuth.runtimeId)
       throw new Error("X-Runtime-Instance-ID does not match token");
   }
-  const agentId =
-    auth.kind === "agent"
-      ? auth.agentId
-      : auth.kind === "operator"
-        ? header(req, "x-agent-id")
-        : undefined;
+  const user = authUser(auth);
+  const isOperator = isOperatorAuth(auth);
+  const agentId = agentAuth
+    ? agentAuth.agentId
+    : isOperator
+      ? header(req, "x-agent-id")
+      : undefined;
   const guestId = `guest-${crypto.randomUUID()}`;
   return {
-    runtimeId:
-      auth.kind === "agent" && auth.runtimeId
-        ? auth.runtimeId
-        : header(req, "x-runtime-instance-id"),
+    runtimeId: agentAuth?.runtimeId ?? header(req, "x-runtime-instance-id"),
     identity: {
       agentId,
-      sourceTaskId:
-        auth.kind === "agent" ? (auth.taskId ?? undefined) : header(req, "x-source-task-id"),
-      userId: auth.kind === "user" ? auth.userId : undefined,
-      isOperator: auth.kind === "operator",
-      dashboardUserId: auth.kind === "operator" ? auth.dashboardUserId : undefined,
+      sourceTaskId: agentAuth ? (agentAuth.taskId ?? undefined) : header(req, "x-source-task-id"),
+      userId: user?.id,
+      isOperator,
+      dashboardUserId: isOperator ? auth.dashboardUserId : undefined,
     } satisfies Identity,
     me: {
-      userId: auth.kind === "user" ? auth.userId : (agentId ?? guestId),
-      name: auth.kind === "user" ? auth.user.name : (agentId ?? `Guest ${guestId.slice(-6)}`),
-      kind: auth.kind === "user" ? "user" : agentId ? "agent" : "guest",
+      userId: user ? user.id : (agentId ?? guestId),
+      name: user ? user.name : (agentId ?? `Guest ${guestId.slice(-6)}`),
+      kind: user ? "user" : agentId ? "agent" : "guest",
     } as Viewer,
-    expiresAt: auth.kind === "agent" ? Date.parse(auth.expiresAt) : undefined,
-    ...(auth.kind === "agent"
+    expiresAt: agentAuth ? Date.parse(agentAuth.expiresAt) : undefined,
+    ...(agentAuth
       ? {
           sessionToken: {
-            tokenId: auth.tokenId,
+            tokenId: agentAuth.tokenId,
             check: async () => {
               const current = await resolveHttpRequestAuth(req, getApiKey(), {
                 touchSessionToken: false,
               });
-              if (current?.kind !== "agent" || current.tokenId !== auth.tokenId)
+              if (current?.kind !== "agent" || current.tokenId !== agentAuth.tokenId)
                 throw new Error("Session token revoked or expired");
             },
           },
