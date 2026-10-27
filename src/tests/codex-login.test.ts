@@ -438,4 +438,47 @@ describe("runCodexLogin", () => {
     );
     expect(exit).not.toHaveBeenCalled();
   });
+
+  it("warns when the authenticated account already occupies another pool slot (#1551)", async () => {
+    const logs: string[] = [];
+
+    await runCodexLogin([], {
+      resolveConfig: async () => ({
+        apiUrl: "http://localhost:3013",
+        apiKey: "example-test-key",
+        slot: undefined,
+      }),
+      login: mock(async () => ({
+        access: "at_new",
+        refresh: "rt_new",
+        expires: Date.now() + 3600000,
+        accountId: "acc-shared-d3Ove",
+      })),
+      store: mock(async () => {}),
+      loadAllSlots: mock(async () => [
+        {
+          slot: 0,
+          creds: {
+            access: "at_old",
+            refresh: "rt_old",
+            expires: Date.now() + 3600000,
+            accountId: "acc-shared-d3Ove",
+          },
+        },
+      ]),
+      clearAuthBench: mock(async () => false),
+      readAuthFence: mock(async () => 0),
+      log: (msg) => logs.push(msg),
+      error: () => {},
+      exit: () => {},
+    });
+
+    expect(
+      logs.some(
+        (m) =>
+          m.includes("Warning: account ...d3Ove already occupies slot 0") &&
+          m.includes("--slot 0"),
+      ),
+    ).toBe(true);
+  });
 });
