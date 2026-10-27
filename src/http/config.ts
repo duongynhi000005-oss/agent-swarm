@@ -30,6 +30,7 @@ import { getRequestAuth, type HttpRequestAuth } from "../utils/request-auth-cont
 import { registerVolatileSecret } from "../utils/secret-scrubber";
 import { reloadGlobalConfigsAndIntegrations, scheduleIntegrationsReload } from "./core";
 import { syncRankingAfterConfigChange } from "./ranking";
+import { rejectGuest, resolveHttpPrincipal } from "./request-principal";
 import { route } from "./route-def";
 import { duplicateGuardedQueryKey, jsonError } from "./utils";
 
@@ -217,16 +218,14 @@ export async function ensureHttpPermission(
   verb: PermissionVerb,
   forbiddenMessage: string,
 ): Promise<boolean> {
-  const auth = getRequestAuth(req);
-  if (auth?.kind === "operator" || auth?.kind === "user") return true;
-  if (auth?.kind === "guest") {
-    jsonError(res, "Forbidden", 403);
-    return false;
-  }
-  const agentId = auth?.kind === "agent" ? auth.agentId : singleHeader(req, "x-agent-id");
-  const agent = agentId ? await getAgentById(agentId) : undefined;
+  if (rejectGuest(req, res)) return false;
+  const principal = await resolveHttpPrincipal(req, singleHeader(req, "x-agent-id"), {
+    precedence: "operator-first",
+    unauthenticated: "empty-agent",
+  });
+  if (principal.kind === "operator" || principal.kind === "user") return true;
   const decision = can({
-    principal: { kind: "agent", agentId: agentId ?? "", isLead: agent?.isLead ?? false },
+    principal,
     verb,
     resource: { kind: "none" },
     source: "http",

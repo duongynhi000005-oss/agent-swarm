@@ -2,7 +2,7 @@ import type { IncomingMessage, ServerResponse } from "node:http";
 import { z } from "zod";
 import { resolveHttpAuditUserId } from "@/be/audit-user";
 import { normalizeDate } from "@/be/date-utils";
-import { getAgentById, getDbClient } from "@/be/db";
+import { getDbClient } from "@/be/db";
 import {
   createOAuthApp,
   deleteAuthorizationById,
@@ -67,10 +67,10 @@ import {
   type IntegrationType,
 } from "@/telemetry";
 import type { OAuthApp } from "@/tracker/types";
-import { getRequestAuth } from "@/utils/request-auth-context";
 import { resolveScopedResourceId, scopedResourceScopeIdSchema } from "@/utils/scoped-resource";
 import { registerVolatileSecret, scrubSecrets } from "@/utils/secret-scrubber";
 import { staticOAuthCallbackUri } from "./oauth-callback";
+import { rejectGuest, resolveHttpPrincipal } from "./request-principal";
 import { route } from "./route-def";
 import { jsonError } from "./utils";
 
@@ -1069,21 +1069,15 @@ async function ensureConnectionAdmin(
   res: ServerResponse,
   agentId: string | undefined,
 ): Promise<boolean> {
-  const auth = getRequestAuth(req);
-  if (auth?.kind === "operator" || auth?.kind === "user") return true;
-  if (auth?.kind === "guest") {
-    jsonError(res, "Forbidden", 403);
-    return false;
-  }
+  if (rejectGuest(req, res)) return false;
+  const principal = await resolveHttpPrincipal(req, agentId ?? singleHeader(req, "x-agent-id"), {
+    precedence: "operator-first",
+    unauthenticated: "empty-agent",
+  });
+  if (principal.kind === "operator" || principal.kind === "user") return true;
 
-  const callerAgentId = agentId ?? singleHeader(req, "x-agent-id");
-  const agent = callerAgentId ? await getAgentById(callerAgentId) : undefined;
   const decision = can({
-    principal: {
-      kind: "agent",
-      agentId: callerAgentId ?? "",
-      isLead: agent?.isLead ?? false,
-    },
+    principal,
     verb: "script-connection.manage",
     resource: { kind: "none" },
     source: "http",
@@ -1107,17 +1101,15 @@ async function ensureVerbAdmin(
   verb: "oauth-app.manage" | "oauth-authorization.manage",
   denyMessage: string,
 ): Promise<boolean> {
-  const auth = getRequestAuth(req);
-  if (auth?.kind === "operator" || auth?.kind === "user") return true;
-  if (auth?.kind === "guest") {
-    jsonError(res, "Forbidden", 403);
-    return false;
-  }
+  if (rejectGuest(req, res)) return false;
+  const principal = await resolveHttpPrincipal(req, agentId ?? singleHeader(req, "x-agent-id"), {
+    precedence: "operator-first",
+    unauthenticated: "empty-agent",
+  });
+  if (principal.kind === "operator" || principal.kind === "user") return true;
 
-  const callerAgentId = agentId ?? singleHeader(req, "x-agent-id");
-  const agent = callerAgentId ? await getAgentById(callerAgentId) : undefined;
   const decision = can({
-    principal: { kind: "agent", agentId: callerAgentId ?? "", isLead: agent?.isLead ?? false },
+    principal,
     verb,
     resource: { kind: "none" },
     source: "http",

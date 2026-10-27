@@ -75,7 +75,12 @@ import {
 import { getRequestAuth } from "../utils/request-auth-context";
 import { isRuntimePoolsEnabled } from "../utils/runtime-pools-flag";
 import { canMutateTaskNamespace } from "./assets";
-import { agentFirstPrincipal } from "./request-principal";
+import {
+  agentFirstPrincipal,
+  authUserId,
+  requireAuthKind,
+  resolveHttpPrincipal,
+} from "./request-principal";
 import { route } from "./route-def";
 import { resolveSessionActor, type SessionActor, sessionAccessFor } from "./session-access";
 import { jsonError } from "./utils";
@@ -370,11 +375,13 @@ async function ensureAgentTokenManager(
   res: ServerResponse,
   agentId: string,
 ): Promise<boolean> {
-  const auth = getRequestAuth(req);
-  if (auth?.kind !== "operator" && auth?.kind !== "user") {
-    jsonError(res, "Worker tokens require operator or user credentials", 403);
-    return false;
-  }
+  const auth = requireAuthKind(
+    req,
+    res,
+    ["operator", "user"] as const,
+    "Worker tokens require operator or user credentials",
+  );
+  if (!auth) return false;
   const header = req.headers["x-agent-id"];
   const decision = can({
     principal: await agentFirstPrincipal(req, Array.isArray(header) ? header[0] : header),
@@ -390,8 +397,9 @@ async function ensureAgentTokenManager(
   // agent's resolved config, global secrets included. A user without a
   // grant-all role must already hold both, and may not manage the token of an
   // agent that may itself act on any agent (a lead).
-  if (auth.kind === "user" && isRbacEnabled()) {
-    const grant = await getUserGrant(auth.userId);
+  const userId = authUserId(auth);
+  if (userId && isRbacEnabled()) {
+    const grant = await getUserGrant(userId);
     if (!grant.grantsAll) {
       const target = await getAgentById(agentId);
       const targetActsOnAny = can({
@@ -1250,15 +1258,12 @@ export async function handleSessions(
   if (putSessionShares.match(req.method, pathSegments)) {
     const parsed = await putSessionShares.parse(req, res, pathSegments, queryParams);
     if (!parsed) return true;
-    const auth = getRequestAuth(req);
     const actor = await resolveSessionActor(req, myAgentId);
     // Sharing is a dashboard action: a person, or the operator key itself.
-    const principal =
-      auth?.kind === "user"
-        ? ({ kind: "user", userId: auth.userId } as const)
-        : auth?.kind === "operator" && !myAgentId
-          ? ({ kind: "operator" } as const)
-          : null;
+    const principal = await resolveHttpPrincipal(req, myAgentId, {
+      precedence: "agent-first",
+      unauthenticated: "null",
+    });
     if (
       !principal ||
       !can({ principal, verb: "session.share", resource: { kind: "none" }, source: "http" }).allow

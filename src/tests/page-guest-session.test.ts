@@ -11,7 +11,15 @@ import { type IncomingMessage, ServerResponse } from "node:http";
 import type { Subprocess } from "bun";
 import { getOperatorActor } from "../http/operator-actor";
 import { isGuestAllowedProxyPath } from "../http/page-proxy";
-import { agentFirstPrincipal, requestPrincipal } from "../http/request-principal";
+import {
+  agentFirstPrincipal,
+  authAgentId,
+  authUserId,
+  isOperatorAuth,
+  requestPrincipal,
+  requireAuthKind,
+  resolveHttpPrincipal,
+} from "../http/request-principal";
 import { can } from "../rbac";
 import { signPageSession } from "../utils/page-session";
 import { setRequestAuth } from "../utils/request-auth-context";
@@ -419,6 +427,61 @@ describe("in-process principal helpers", () => {
     const res = new ServerResponse(req);
     expect(getOperatorActor(req, res)).toBeNull();
     expect(res.statusCode).toBe(403);
+  });
+
+  test("resolveHttpPrincipal and auth kind guards handle all auth variants consistently", async () => {
+    const opReq = fakeReq();
+    setRequestAuth(opReq, { kind: "operator", fingerprint: "fp" });
+    expect(
+      await resolveHttpPrincipal(opReq, agentId, {
+        precedence: "operator-first",
+        unauthenticated: "null",
+      }),
+    ).toEqual({ kind: "operator" });
+    expect(
+      await resolveHttpPrincipal(opReq, agentId, {
+        precedence: "agent-first",
+        unauthenticated: "empty-agent",
+      }),
+    ).toEqual({ kind: "agent", agentId, isLead: false });
+
+    const unauthReq = fakeReq();
+    expect(
+      await resolveHttpPrincipal(unauthReq, undefined, {
+        precedence: "agent-first",
+        unauthenticated: "empty-agent",
+      }),
+    ).toEqual({ kind: "agent", agentId: "", isLead: false });
+    expect(
+      await resolveHttpPrincipal(unauthReq, undefined, {
+        precedence: "operator-first",
+        unauthenticated: "null",
+      }),
+    ).toBeNull();
+
+    const ctrlReq = fakeReq();
+    setRequestAuth(ctrlReq, { kind: "controller", controllerId: "c1" });
+    expect(
+      await resolveHttpPrincipal(ctrlReq, undefined, {
+        precedence: "operator-first",
+        unauthenticated: "null",
+      }),
+    ).toBeNull();
+
+    const resDenied = new ServerResponse(ctrlReq);
+    expect(requireAuthKind(ctrlReq, resDenied, ["operator", "user"] as const, "Denied")).toBeNull();
+    expect(resDenied.statusCode).toBe(403);
+
+    const resAllowed = new ServerResponse(opReq);
+    expect(requireAuthKind(opReq, resAllowed, ["operator", "user"] as const, "Denied")).toEqual({
+      kind: "operator",
+      fingerprint: "fp",
+    });
+    expect(isOperatorAuth({ kind: "operator", fingerprint: "fp" })).toBe(true);
+    expect(authUserId({ kind: "operator", fingerprint: "fp" })).toBeUndefined();
+    expect(authAgentId({ kind: "operator", fingerprint: "fp" }, "fallback-agent")).toBe(
+      "fallback-agent",
+    );
   });
 
   test("can() denies every verb for a guest and still allows the operator", () => {

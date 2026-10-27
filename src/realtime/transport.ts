@@ -5,6 +5,7 @@ import { z } from "zod";
 import { getPage } from "../be/db";
 import { findUserById } from "../be/users";
 import { resolveHttpRequestAuth } from "../http/auth";
+import { authUser, authUserId, isOperatorAuth } from "../http/request-principal";
 import { getApiKey } from "../utils/api-key";
 import { extractAndVerifyCookie } from "../utils/page-session";
 import type { HttpRequestAuth } from "../utils/request-auth-context";
@@ -114,14 +115,14 @@ function identityFromHttpAuth(
       agentId,
       sourceTaskId:
         auth.kind === "agent" ? (auth.taskId ?? undefined) : header(req, "x-source-task-id"),
-      userId: auth.kind === "user" ? auth.userId : undefined,
-      isOperator: auth.kind === "operator",
-      dashboardUserId: auth.kind === "operator" ? auth.dashboardUserId : undefined,
+      userId: authUserId(auth),
+      isOperator: isOperatorAuth(auth),
+      dashboardUserId: isOperatorAuth(auth) ? auth.dashboardUserId : undefined,
     } satisfies Identity,
     me: {
-      userId: auth.kind === "user" ? auth.userId : (agentId ?? guestId),
-      name: auth.kind === "user" ? auth.user.name : (agentId ?? `Guest ${guestId.slice(-6)}`),
-      kind: auth.kind === "user" ? "user" : agentId ? "agent" : "guest",
+      userId: authUserId(auth) ?? agentId ?? guestId,
+      name: authUser(auth)?.name ?? agentId ?? `Guest ${guestId.slice(-6)}`,
+      kind: authUserId(auth) ? "user" : agentId ? "agent" : "guest",
     } as Viewer,
     expiresAt: auth.kind === "agent" ? Date.parse(auth.expiresAt) : undefined,
     ...(auth.kind === "agent"
