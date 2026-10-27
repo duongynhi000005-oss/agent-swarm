@@ -281,6 +281,56 @@ const PARITY_PROBES: Record<string, string> = {
     roundTrip: atob(btoa(String.fromCharCode(...Array.from({ length: 256 }, (_, i) => i)))).length,
   };
 }`,
+  structuredClone: `async () => {
+  const attempt = (run) => { try { return run(); } catch (error) { return error.name; } };
+  const shared = { n: 1 };
+  const cyclic = { a: shared, b: shared };
+  cyclic.self = cyclic;
+  const clonedCyclic = structuredClone(cyclic);
+  cyclic.a.n = 99;
+
+  const buf = new Uint8Array([10, 20, 30, 40]).buffer;
+  const views = structuredClone({
+    left: new Uint8Array(buf, 0, 2),
+    right: new Uint8Array(buf, 2, 2),
+    dv: new DataView(buf, 1, 2),
+  });
+  const map = new Map([[{ k: 1 }, new Set(["a", "b"])]]);
+  const clonedMap = structuredClone(map);
+  const [[mapKey, mapSet]] = [...clonedMap.entries()];
+
+  const sparse = [1, , 3];
+  sparse.tag = "ok";
+  const clonedSparse = structuredClone(sparse);
+  const err = structuredClone(new RangeError("out of bounds"));
+
+  return {
+    primitives: [structuredClone(undefined), structuredClone(null), structuredClone(true), structuredClone(42), structuredClone("str"), String(structuredClone(123n))],
+    cyclicSelf: clonedCyclic.self === clonedCyclic,
+    sharedIdentity: clonedCyclic.a === clonedCyclic.b,
+    deepIsolated: clonedCyclic.a.n === 1,
+    date: structuredClone(new Date(1700000000000)).getTime(),
+    regex: [structuredClone(/ab+c/gi).source, structuredClone(/ab+c/gi).flags],
+    sharedBuffer: views.left.buffer === views.right.buffer && views.left.buffer === views.dv.buffer,
+    viewBytes: [...views.left, ...views.right, views.dv.getUint8(0), views.dv.getUint8(1)],
+    mapEntry: [mapKey.k, [...mapSet]],
+    sparse: [clonedSparse.length, 1 in clonedSparse, clonedSparse.tag, Object.keys(clonedSparse)],
+    nullProto: Object.getPrototypeOf(structuredClone(Object.assign(Object.create(null), { x: 1 }))) === Object.prototype,
+    symbolKeyIgnored: Object.keys(structuredClone({ [Symbol("s")]: 1, keep: 2 })),
+    error: [err instanceof RangeError, err.name, err.message],
+    transferOk: structuredClone({ x: new Uint8Array([1, 2]) }, { transfer: [new ArrayBuffer(4)] }).x.length,
+    errors: [
+      attempt(() => structuredClone()),
+      attempt(() => structuredClone(() => {})),
+      attempt(() => structuredClone(Symbol("x"))),
+      attempt(() => structuredClone({ fn: () => {} })),
+      attempt(() => structuredClone(new WeakMap())),
+      attempt(() => structuredClone(Promise.resolve(1))),
+      attempt(() => structuredClone(new URL("https://example.com"))),
+      attempt(() => { const b = new ArrayBuffer(2); return structuredClone(b, { transfer: [b, b] }); }),
+    ],
+  };
+}`,
   TextEncoder: `async () => {
   const encoder = new TextEncoder();
   const bytes = encoder.encode("héllo 👋 \\uD800x");

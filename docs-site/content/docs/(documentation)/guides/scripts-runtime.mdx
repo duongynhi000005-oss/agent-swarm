@@ -385,9 +385,9 @@ access except the host calls below. These are the differences from `native`:
   `ctx.stdlib.fetchJson`, `ctx.stdlib.table`, `ctx.stdlib.Redacted`,
   `ctx.logger`, `console`, `fetch`, `Headers`, `Response`, `setTimeout`,
   `clearTimeout`, `setInterval`, `clearInterval`, `URL`, `URLSearchParams`,
-  `TextEncoder`, `TextDecoder` (UTF-8 only), `atob`, `btoa`, `crypto.randomUUID`,
-  `crypto.getRandomValues`, and the `zod`, `zod/mini`, `stdlib`, and
-  `swarm-sdk` imports.
+  `TextEncoder`, `TextDecoder` (UTF-8 only), `atob`, `btoa`, `structuredClone`,
+  `crypto.randomUUID`, `crypto.getRandomValues`, and the `zod`, `zod/mini`,
+  `stdlib`, and `swarm-sdk` imports.
 - **`fetch` bodies:** a request body can be a string, a `Uint8Array` or other
   typed array, an `ArrayBuffer`, or `URLSearchParams`. A binary body is
   capped at 16 MiB, and the binary bodies one run has in flight or queued at
@@ -396,8 +396,7 @@ access except the host calls below. These are the differences from `native`:
   `FormData`, `arrayBuffer()`, and `AbortSignal` are not supported.
 - **Not available:** `ctx.stdlib.glob`, `ctx.stdlib.grep`, `process`, `Bun`,
   `Buffer`, `crypto.subtle`, `Intl` (so `toLocaleString(locale, options)`
-  ignores its arguments), `AbortController`, `AbortSignal`, and
-  `structuredClone`. The typecheck accepts some of them, so `script-upsert`,
+  ignores its arguments), `AbortController`, and `AbortSignal`. The typecheck accepts some of them, so `script-upsert`,
   script API creation, and app writes return a `warnings` list when the source
   uses one. The same list flags a literal `fetch`, `ctx.stdlib.fetch`, or
   `fetchJson` URL whose host is single-label or private: whether quickjs

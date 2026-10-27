@@ -131,8 +131,8 @@ export default async () => { const process = { env: {} }; return [decode({ from:
     expect(checkQuickJSCompat(ambient).findings[0]?.rule).toBe("unsupportedGlobal");
   });
 
-  test("atob and btoa are shimmed; AbortSignal stays reported", () => {
-    expect(checkQuickJSCompat(wrap("return atob(btoa('hi'));"))).toEqual({
+  test("atob, btoa and structuredClone are shimmed; AbortSignal stays reported", () => {
+    expect(checkQuickJSCompat(wrap("return structuredClone(atob(btoa('hi')));"))).toEqual({
       compatible: true,
       findings: [],
     });

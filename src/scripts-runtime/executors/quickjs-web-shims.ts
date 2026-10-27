@@ -1,8 +1,8 @@
 /**
  * Pure-JS web globals that the QuickJS build lacks: `URL`, `URLSearchParams`,
- * `TextEncoder`, `TextDecoder` (UTF-8 only), `atob` and `btoa`. The quickjs runner evaluates
- * this before `SANDBOX_PRELUDE`, so the prelude's fetch can serialize a
- * `URLSearchParams` body. Nothing here calls the host.
+ * `TextEncoder`, `TextDecoder` (UTF-8 only), `atob`, `btoa` and `structuredClone`.
+ * The quickjs runner evaluates this before `SANDBOX_PRELUDE`, so the prelude's
+ * fetch can serialize a `URLSearchParams` body. Nothing here calls the host.
  *
  * `URL` follows the WHATWG URL parser for what scripts use: special and
  * non-special schemes, relative resolution, dot segments, percent-encoding,
@@ -1029,10 +1029,133 @@ function atob(data) {
   return out;
 }
 
+// ── structuredClone ──
+const dataCloneError = (message) => {
+  const error = new Error(message);
+  error.name = "DataCloneError";
+  return error;
+};
+const ERROR_CTORS = { Error, EvalError, RangeError, ReferenceError, SyntaxError, TypeError, URIError };
+const UNCLONEABLE = [WeakMap, WeakSet, Promise];
+function structuredClone(value, options) {
+  if (arguments.length === 0) throw new TypeError("structuredClone requires at least 1 argument");
+  if (options !== undefined && options !== null) {
+    if (typeof options !== "object" && typeof options !== "function") {
+      throw new TypeError("structuredClone options must be an object");
+    }
+    if (options.transfer !== undefined) {
+      if (options.transfer === null || typeof options.transfer[Symbol.iterator] !== "function") {
+        throw new TypeError("structuredClone transfer option must be iterable");
+      }
+      const transferred = new Set();
+      for (const item of options.transfer) {
+        if (!(item instanceof ArrayBuffer)) throw dataCloneError("Transfer list item is not transferable");
+        if (transferred.has(item)) throw dataCloneError("Transfer list contains duplicate ArrayBuffer");
+        transferred.add(item);
+      }
+    }
+  }
+  const seen = new Map();
+  const clone = (val) => {
+    if (val === null || (typeof val !== "object" && typeof val !== "function")) {
+      if (typeof val === "symbol") throw dataCloneError("Symbol cannot be cloned");
+      return val;
+    }
+    if (typeof val === "function") throw dataCloneError("Function cannot be cloned");
+    if (seen.has(val)) return seen.get(val);
+    if (val instanceof Date) {
+      const copy = new Date(val.getTime());
+      seen.set(val, copy);
+      return copy;
+    }
+    if (val instanceof RegExp) {
+      const copy = new RegExp(val.source, val.flags);
+      seen.set(val, copy);
+      return copy;
+    }
+    if (val instanceof Boolean) {
+      const copy = new Boolean(val.valueOf());
+      seen.set(val, copy);
+      return copy;
+    }
+    if (val instanceof Number) {
+      const copy = new Number(val.valueOf());
+      seen.set(val, copy);
+      return copy;
+    }
+    if (val instanceof String) {
+      const copy = new String(val.valueOf());
+      seen.set(val, copy);
+      return copy;
+    }
+    if (val instanceof ArrayBuffer) {
+      const copy = val.slice(0);
+      seen.set(val, copy);
+      return copy;
+    }
+    if (val instanceof DataView) {
+      const buf = clone(val.buffer);
+      const copy = new DataView(buf, val.byteOffset, val.byteLength);
+      seen.set(val, copy);
+      return copy;
+    }
+    if (ArrayBuffer.isView(val)) {
+      const buf = clone(val.buffer);
+      const Ctor = val.constructor;
+      const copy = new Ctor(buf, val.byteOffset, val.length);
+      seen.set(val, copy);
+      return copy;
+    }
+    if (val instanceof Map) {
+      const copy = new Map();
+      seen.set(val, copy);
+      for (const [k, v] of val.entries()) copy.set(clone(k), clone(v));
+      return copy;
+    }
+    if (val instanceof Set) {
+      const copy = new Set();
+      seen.set(val, copy);
+      for (const v of val.values()) copy.add(clone(v));
+      return copy;
+    }
+    if (val instanceof Error) {
+      const Ctor = ERROR_CTORS[val.name] || Error;
+      const copy = new Ctor(val.message);
+      copy.name = val.name;
+      if ("stack" in val) copy.stack = val.stack;
+      seen.set(val, copy);
+      return copy;
+    }
+    if (
+      UNCLONEABLE.some((type) => val instanceof type) ||
+      val instanceof URL ||
+      val instanceof URLSearchParams ||
+      val instanceof TextEncoder ||
+      val instanceof TextDecoder ||
+      (globalThis.Headers && val instanceof globalThis.Headers) ||
+      (globalThis.Response && val instanceof globalThis.Response)
+    ) {
+      throw dataCloneError("Object cannot be cloned");
+    }
+    if (Array.isArray(val)) {
+      const copy = new Array(val.length);
+      seen.set(val, copy);
+      for (const key of Object.keys(val)) copy[key] = clone(val[key]);
+      return copy;
+    }
+    const copy = {};
+    seen.set(val, copy);
+    for (const key of Object.keys(val)) copy[key] = clone(val[key]);
+    return copy;
+  };
+  return clone(value);
+}
+
 const define = (name, value) =>
   Object.defineProperty(globalThis, name, { value, writable: true, configurable: true, enumerable: false });
 define("atob", atob);
 define("btoa", btoa);
+define("structuredClone", structuredClone);
 define("URL", URL);
 define("URLSearchParams", URLSearchParams);
 define("TextEncoder", TextEncoder);
