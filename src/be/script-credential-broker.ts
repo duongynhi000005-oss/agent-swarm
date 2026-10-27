@@ -35,9 +35,53 @@ export type ScriptUserConfig = Record<string, { value: string; isSecret: boolean
  * widens nothing; it only makes the documented accessor return them. Secret
  * values are registered with the scrubber so they never leave in run output.
  */
-function toScriptUserConfig(configs: Awaited<ReturnType<typeof getResolvedConfig>>) {
+const CONNECTION_DERIVED_SECRET_KEY_RE = /^connection\.[^.]+\.secret$/i;
+
+/**
+ * True for config keys that exist solely to back a brokered script capability
+ * (`ctx.fs` / `ctx.sh` agent-fs mounts or connection-derived inline secrets)
+ * and must never be handed to script code as raw config values.
+ */
+export function isScriptConfinedConfigKey(key: string): boolean {
+  return key === AGENT_FS_API_KEY_CONFIG || CONNECTION_DERIVED_SECRET_KEY_RE.test(key);
+}
+
+/**
+ * Config keys confined to the credential broker for a script run in `context`:
+ * `AGENT_FS_API_KEY` plus every config key referenced by a relational
+ * credential binding (connection-managed or standalone) in that scope.
+ */
+export async function getScriptConfinedConfigKeys(context?: {
+  agentId?: string;
+  repoId?: string;
+}): Promise<Set<string>> {
+  const [allActive, scopedWithInactive] = await Promise.all([
+    listRelationalCredentialBindings(),
+    listRelationalCredentialBindings({
+      agentId: context?.agentId,
+      repoId: context?.repoId,
+      includeInactive: true,
+    }),
+  ]);
+  const confined = new Set<string>([AGENT_FS_API_KEY_CONFIG]);
+  for (const binding of DEFAULT_CREDENTIAL_BINDINGS) {
+    if (binding.configKey) confined.add(binding.configKey);
+  }
+  for (const binding of [...allActive, ...scopedWithInactive]) {
+    if (binding.configKey) confined.add(binding.configKey);
+  }
+  return confined;
+}
+
+function toScriptUserConfig(
+  configs: Awaited<ReturnType<typeof getResolvedConfig>>,
+  confinedKeys: ReadonlySet<string>,
+) {
   const exposed = configs.filter(
-    (config) => !isApiOnlyConfigKey(config.key) && !isInternalConfigKey(config.key),
+    (config) =>
+      !isApiOnlyConfigKey(config.key) &&
+      !isInternalConfigKey(config.key) &&
+      !(config.isSecret && (isScriptConfinedConfigKey(config.key) || confinedKeys.has(config.key))),
   );
   for (const config of exposed) {
     if (config.isSecret && config.value) {
@@ -117,8 +161,12 @@ export async function buildScriptCredentialBindingsWithFailures(input: {
   agentFs?: ScriptAgentFsDescriptor;
 }> {
   const resolvedConfigs = await getResolvedConfig(input.agentId, input.repoId);
+  const confinedKeys = await getScriptConfinedConfigKeys({
+    agentId: input.agentId,
+    repoId: input.repoId,
+  });
   // Before the binding loop below, so a binding's own scrubber label wins.
-  const userConfig = toScriptUserConfig(resolvedConfigs);
+  const userConfig = toScriptUserConfig(resolvedConfigs, confinedKeys);
   const configMap = new Map(resolvedConfigs.map((config) => [config.key, config.value]));
   const broker = new CredentialBroker(
     new RelationalCredentialBindingStore(),

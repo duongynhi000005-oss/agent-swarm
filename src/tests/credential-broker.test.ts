@@ -431,4 +431,185 @@ describe("credential broker", () => {
       "https://example.com/v1/items?api_key=[REDACTED:VENDOR_API_KEY]&q=one",
     );
   });
+
+  test("only substitutes placeholders in the header declared by headerTemplate and drops placeholders in If-Match or custom headers", async () => {
+    let authorization: string | null = null;
+    let ifMatch: string | null = null;
+    let customExfil: string | null = null;
+    let accept: string | null = null;
+    globalThis.fetch = (async (_input: string | URL | Request, init?: RequestInit) => {
+      const headers = new Headers(init?.headers);
+      authorization = headers.get("authorization");
+      ifMatch = headers.get("if-match");
+      customExfil = headers.get("x-custom-exfil");
+      accept = headers.get("accept");
+      return Response.json({ ok: true });
+    }) as typeof fetch;
+
+    patchFetchWithCredentialBroker([
+      {
+        configKey: "GITHUB_TOKEN",
+        allowedHosts: ["api.github.com"],
+        headerTemplate: "Authorization: Bearer [REDACTED:GITHUB_TOKEN]",
+        scope: "global",
+        scopeId: null,
+        active: true,
+        placeholder: "[REDACTED:GITHUB_TOKEN]",
+        value: "ghp_secret",
+      },
+    ]);
+
+    await fetch("https://api.github.com/repos/desplega-ai/agent-swarm", {
+      headers: {
+        Authorization: "Bearer [REDACTED:GITHUB_TOKEN]",
+        "If-Match": '"[REDACTED:GITHUB_TOKEN]"',
+        "X-Custom-Exfil": "[REDACTED:GITHUB_TOKEN]",
+        Accept: "application/vnd.github+json",
+      },
+    });
+
+    expect(authorization).toBe("Bearer ghp_secret");
+    expect(ifMatch).toBeNull();
+    expect(customExfil).toBeNull();
+    expect(accept).toBe("application/vnd.github+json");
+  });
+
+  test("strips custom credential binding headers on cross-origin redirects even when destination host is allowlisted", async () => {
+    const hopHeaders: Array<{ xApiKey: string | null; authorization: string | null }> = [];
+    globalThis.fetch = (async (input: string | URL | Request, init?: RequestInit) => {
+      const req = input instanceof Request ? input : new Request(input, init);
+      const headers = new Headers(init?.headers ?? req.headers);
+      hopHeaders.push({
+        xApiKey: headers.get("x-api-key"),
+        authorization: headers.get("authorization"),
+      });
+      if (hopHeaders.length === 1) {
+        return new Response(null, {
+          status: 302,
+          headers: { Location: "https://127.0.0.1:8443/redirected" },
+        });
+      }
+      return Response.json({ ok: true });
+    }) as typeof fetch;
+
+    patchFetchWithCredentialBroker([
+      {
+        configKey: "VENDOR_KEY",
+        allowedHosts: ["127.0.0.1"],
+        headerTemplate: "X-Api-Key: [REDACTED:VENDOR_KEY]",
+        scope: "global",
+        scopeId: null,
+        active: true,
+        placeholder: "[REDACTED:VENDOR_KEY]",
+        value: "vendor_custom_header_secret",
+      },
+    ]);
+
+    await fetch("https://127.0.0.1:443/initial", {
+      headers: { "X-Api-Key": "[REDACTED:VENDOR_KEY]" },
+    });
+
+    expect(hopHeaders).toEqual([
+      { xApiKey: "vendor_custom_header_secret", authorization: null },
+      { xApiKey: null, authorization: null },
+    ]);
+  });
+
+  test("same-realm prototype and intrinsic monkey-patching cannot observe resolved secrets", async () => {
+    let destinationAuth: string | null = null;
+    let destinationUrl: string | null = null;
+    const origGet = Headers.prototype.get;
+    globalThis.fetch = (async (input: string | URL | Request, init?: RequestInit) => {
+      destinationUrl =
+        typeof input === "string" ? input : input instanceof URL ? input.href : input.url;
+      destinationAuth = init?.headers
+        ? origGet.call(init.headers as Headers, "authorization")
+        : null;
+      return Response.json({ ok: true });
+    }) as typeof fetch;
+
+    patchFetchWithCredentialBroker([
+      {
+        configKey: "HEADER_SECRET_KEY",
+        allowedHosts: ["api.vendor.test"],
+        headerTemplate: "Authorization: Bearer [REDACTED:HEADER_SECRET_KEY]",
+        scope: "global",
+        scopeId: null,
+        active: true,
+        placeholder: "[REDACTED:HEADER_SECRET_KEY]",
+        value: "super_secret_header_val_999",
+      },
+      {
+        configKey: "QUERY_SECRET_KEY",
+        allowedHosts: ["api.vendor.test"],
+        queryTemplate: "api_key=[REDACTED:QUERY_SECRET_KEY]",
+        scope: "global",
+        scopeId: null,
+        active: true,
+        placeholder: "[REDACTED:QUERY_SECRET_KEY]",
+        value: "super_secret_query_val_888",
+      },
+    ]);
+
+    const observedByMonkeyPatch: string[] = [];
+    const origSet = Headers.prototype.set;
+    const origAppend = Headers.prototype.append;
+    const origEntries = Headers.prototype.entries;
+    const origJoin = Array.prototype.join;
+    const origReplaceAll = String.prototype.replaceAll;
+
+    Headers.prototype.set = function (name: string, value: string) {
+      observedByMonkeyPatch.push(`set:${name}:${value}`);
+      return origSet.call(this, name, value);
+    };
+    Headers.prototype.append = function (name: string, value: string) {
+      observedByMonkeyPatch.push(`append:${name}:${value}`);
+      return origAppend.call(this, name, value);
+    };
+    Headers.prototype.entries = function () {
+      const it = origEntries.call(this);
+      return {
+        [Symbol.iterator]() {
+          return this;
+        },
+        next() {
+          const step = it.next();
+          if (!step.done && step.value) {
+            observedByMonkeyPatch.push(`entry:${step.value[0]}:${step.value[1]}`);
+          }
+          return step;
+        },
+      } as HeadersIterator<[string, string]>;
+    };
+    Array.prototype.join = function (sep?: string) {
+      const res = origJoin.call(this, sep);
+      observedByMonkeyPatch.push(`join:${res}`);
+      return res;
+    };
+    String.prototype.replaceAll = function (search: string | RegExp, replacement: any) {
+      const res = origReplaceAll.call(this, search as any, replacement);
+      observedByMonkeyPatch.push(`replaceAll:${res}`);
+      return res;
+    };
+
+    try {
+      await fetch("https://api.vendor.test/v1/data?api_key=[REDACTED:QUERY_SECRET_KEY]", {
+        headers: { Authorization: "Bearer [REDACTED:HEADER_SECRET_KEY]" },
+      });
+    } finally {
+      Headers.prototype.set = origSet;
+      Headers.prototype.append = origAppend;
+      Headers.prototype.entries = origEntries;
+      Array.prototype.join = origJoin;
+      String.prototype.replaceAll = origReplaceAll;
+    }
+
+    expect(destinationAuth).toBe("Bearer super_secret_header_val_999");
+    expect(destinationUrl).toBe(
+      "https://api.vendor.test/v1/data?api_key=super_secret_query_val_888",
+    );
+    const combined = observedByMonkeyPatch.join("\n");
+    expect(combined).not.toContain("super_secret_header_val_999");
+    expect(combined).not.toContain("super_secret_query_val_888");
+  });
 });

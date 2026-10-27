@@ -18,6 +18,10 @@ import {
 import { fillOrgLogoFromWebsite } from "../be/org-profile";
 import { getUserGrant } from "../be/rbac-roles";
 import {
+  getScriptConfinedConfigKeys,
+  isScriptConfinedConfigKey,
+} from "../be/script-credential-broker";
+import {
   internalConfigKeyError,
   isApiOnlyConfigKey,
   isInternalConfigKey,
@@ -118,12 +122,22 @@ async function resolveSecretsRead(
  * already holds these values in `ctx.swarm.config`. `undefined` for any other
  * caller.
  */
+async function isRequestFromScriptRunToken(req: IncomingMessage): Promise<boolean> {
+  const auth = getRequestAuth(req);
+  if (auth?.kind !== "agent" || auth.tokenKind !== "agent") return false;
+  return await isScriptRunToken(auth.tokenId);
+}
+
 async function scriptRunHeldConfigIds(req: IncomingMessage): Promise<Set<string> | undefined> {
   const auth = getRequestAuth(req);
   if (auth?.kind !== "agent" || auth.tokenKind !== "agent") return undefined;
   if (!(await isScriptRunToken(auth.tokenId))) return undefined;
+  const confinedKeys = await getScriptConfinedConfigKeys({ agentId: auth.agentId });
   const held = stripApiOnlyKeys(
     await getResolvedConfig(auth.agentId, undefined, { includeRepoSecrets: false }),
+  ).filter(
+    (config) =>
+      !(config.isSecret && (isScriptConfinedConfigKey(config.key) || confinedKeys.has(config.key))),
   );
   return new Set(held.map((config) => config.id));
 }
@@ -140,9 +154,22 @@ async function maskConfigRead(
   includeSecrets: boolean,
 ): Promise<{ result: SwarmConfig[]; secretsNote: string }> {
   const { effectiveIncludeSecrets, secretsNote } = await resolveSecretsRead(req, includeSecrets);
+  const isScriptRun = includeSecrets ? await isRequestFromScriptRunToken(req) : false;
+  const auth = getRequestAuth(req);
+  const confinedKeys =
+    includeSecrets && isScriptRun
+      ? await getScriptConfinedConfigKeys({
+          agentId: auth?.kind === "agent" ? auth.agentId : undefined,
+        })
+      : undefined;
   const held =
     includeSecrets && !effectiveIncludeSecrets ? await scriptRunHeldConfigIds(req) : undefined;
-  const reveal = (config: SwarmConfig) => effectiveIncludeSecrets || !!held?.has(config.id);
+  const isConfined = (config: SwarmConfig) =>
+    isScriptRun &&
+    config.isSecret &&
+    (isScriptConfinedConfigKey(config.key) || !!confinedKeys?.has(config.key));
+  const reveal = (config: SwarmConfig) =>
+    !isConfined(config) && (effectiveIncludeSecrets || !!held?.has(config.id));
   const result = configs.map((config) =>
     config.isSecret && !reveal(config) ? maskSecrets([config])[0]! : config,
   );
@@ -435,15 +462,27 @@ export async function handleConfig(
     );
     // Filter by key before masking and before any secret is registered, so a
     // caller asking for one key never receives the rest (matches get-config).
+    const isScriptRun = effectiveIncludeSecrets ? await isRequestFromScriptRunToken(req) : false;
+    const confinedKeys =
+      effectiveIncludeSecrets && isScriptRun
+        ? await getScriptConfinedConfigKeys(resolvedScope)
+        : undefined;
     const configs = stripApiOnlyKeys(
       await getResolvedConfig(resolvedScope.agentId, resolvedScope.repoId, { includeRepoSecrets }),
     ).filter((c) => !key || c.key === key);
-    const result = effectiveIncludeSecrets ? configs : maskSecrets(configs);
-    if (effectiveIncludeSecrets) {
-      for (const c of result) {
-        if (c.isSecret && c.value) {
-          registerVolatileSecret(c.value, `config:${c.key}`);
-        }
+    const revealResolved = (c: SwarmConfig) =>
+      effectiveIncludeSecrets &&
+      !(
+        isScriptRun &&
+        c.isSecret &&
+        (isScriptConfinedConfigKey(c.key) || confinedKeys?.has(c.key))
+      );
+    const result = configs.map((c) =>
+      c.isSecret && !revealResolved(c) ? maskSecrets([c])[0]! : c,
+    );
+    for (const c of result) {
+      if (c.isSecret && c.value && revealResolved(c)) {
+        registerVolatileSecret(c.value, `config:${c.key}`);
       }
     }
     getResolvedConfigRoute.respond(res, 200, {

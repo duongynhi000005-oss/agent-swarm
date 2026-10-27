@@ -3,6 +3,7 @@ import {
   buildEgressSecrets,
   patchFetchWithEgressSubstitution,
 } from "../scripts-runtime/egress-secrets";
+import { QuickJSScriptExecutor } from "../scripts-runtime/executors/quickjs";
 import { runScript } from "../scripts-runtime/loader";
 import { refreshSecretScrubberCache } from "../utils/secret-scrubber";
 import { SKIP_SANDBOX_SPAWN_TESTS } from "./sandbox-spawn-test-helpers";
@@ -83,6 +84,150 @@ describe("runtime secret egress", () => {
       server.stop(true);
     }
   });
+
+  spawnTest(
+    "confines broker secrets from If-Match header reflection, prototype hooks, and ctx.swarm.config.get across Native and QuickJS executors",
+    async () => {
+      const prevAllowLoopback = process.env.AGENT_SWARM_ALLOW_LOOPBACK_EGRESS;
+      process.env.AGENT_SWARM_ALLOW_LOOPBACK_EGRESS = "true";
+
+      const observedRequests: Array<{
+        authorization: string | null;
+        ifMatch: string | null;
+        xCustom: string | null;
+      }> = [];
+
+      const server = Bun.serve({
+        hostname: "127.0.0.1",
+        port: 0,
+        fetch(req) {
+          observedRequests.push({
+            authorization: req.headers.get("authorization"),
+            ifMatch: req.headers.get("if-match"),
+            xCustom: req.headers.get("x-custom"),
+          });
+          return Response.json({
+            echoIfMatch: req.headers.get("if-match"),
+            echoCustom: req.headers.get("x-custom"),
+          });
+        },
+      });
+
+      const realBrokerSecret = "broker-confined-real-secret-xyz987";
+      const realFsSecret = "agent-fs-confined-real-secret-abc123";
+      const egressSecrets = [
+        {
+          configKey: "connection.local.secret",
+          placeholder: "[REDACTED:connection.local.secret]",
+          allowedHosts: ["127.0.0.1"],
+          headerTemplate: "Authorization: Bearer [REDACTED:connection.local.secret]",
+          scope: "global" as const,
+          scopeId: null,
+          active: true,
+          authKind: "config" as const,
+          value: realBrokerSecret,
+        },
+      ];
+
+      const scriptSource = `
+      export default async (_args, ctx) => {
+        const hooked = [];
+        const origSet = Headers.prototype.set;
+        const origJoin = Array.prototype.join;
+        Headers.prototype.set = function (k, v) {
+          hooked.push(String(v));
+          return origSet.call(this, k, v);
+        };
+        Array.prototype.join = function (sep) {
+          const out = origJoin.call(this, sep);
+          hooked.push(String(out));
+          return out;
+        };
+        const res = await fetch("http://127.0.0.1:${server.port}/test", {
+          headers: {
+            Authorization: "Bearer [REDACTED:connection.local.secret]",
+            "If-Match": "[REDACTED:connection.local.secret]",
+            "X-Custom": "[REDACTED:connection.local.secret]",
+          },
+        });
+        const body = await res.json();
+        return {
+          body,
+          connSecretFromConfig: ctx.swarm.config.get("connection.local.secret") ?? null,
+          fsSecretFromConfig: ctx.swarm.config.get("AGENT_FS_API_KEY") ?? null,
+          normalFromConfig: ctx.stdlib.Redacted.value(ctx.swarm.config.get("NORMAL_PUBLIC_KEY")) ?? null,
+          hookedJoined: hooked.join("|"),
+        };
+      };
+    `;
+
+      try {
+        const nativeOutput = await runScript({
+          agentId: "agent-1",
+          resources: { memoryMb: 2048 },
+          egressSecrets,
+          userConfig: {
+            NORMAL_PUBLIC_KEY: { value: "public-ok", isSecret: false },
+          },
+          source: scriptSource,
+        });
+
+        expect(nativeOutput.error).toBeUndefined();
+        expect(nativeOutput.result).toEqual({
+          body: { echoIfMatch: null, echoCustom: null },
+          connSecretFromConfig: null,
+          fsSecretFromConfig: null,
+          normalFromConfig: "public-ok",
+          hookedJoined: expect.any(String),
+        });
+        expect(JSON.stringify(nativeOutput.result)).not.toContain(realBrokerSecret);
+        expect(JSON.stringify(nativeOutput.result)).not.toContain(realFsSecret);
+
+        const quickjs = new QuickJSScriptExecutor();
+        const quickjsOutput = await runScript({
+          executor: quickjs,
+          agentId: "agent-1",
+          resources: { memoryMb: 2048 },
+          egressSecrets,
+          userConfig: {
+            NORMAL_PUBLIC_KEY: { value: "public-ok", isSecret: false },
+          },
+          source: scriptSource,
+        });
+
+        expect(quickjsOutput.error).toBeUndefined();
+        expect(quickjsOutput.result).toEqual({
+          body: { echoIfMatch: null, echoCustom: null },
+          connSecretFromConfig: null,
+          fsSecretFromConfig: null,
+          normalFromConfig: "public-ok",
+          hookedJoined: expect.any(String),
+        });
+        expect(JSON.stringify(quickjsOutput.result)).not.toContain(realBrokerSecret);
+        expect(JSON.stringify(quickjsOutput.result)).not.toContain(realFsSecret);
+
+        expect(observedRequests).toEqual([
+          {
+            authorization: `Bearer ${realBrokerSecret}`,
+            ifMatch: null,
+            xCustom: null,
+          },
+          {
+            authorization: `Bearer ${realBrokerSecret}`,
+            ifMatch: null,
+            xCustom: null,
+          },
+        ]);
+      } finally {
+        server.stop(true);
+        if (prevAllowLoopback === undefined) {
+          delete process.env.AGENT_SWARM_ALLOW_LOOPBACK_EGRESS;
+        } else {
+          process.env.AGENT_SWARM_ALLOW_LOOPBACK_EGRESS = prevAllowLoopback;
+        }
+      }
+    },
+  );
 });
 
 describe("egress-substitution", () => {

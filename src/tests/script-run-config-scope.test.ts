@@ -2,6 +2,7 @@ import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { randomBytes } from "node:crypto";
 import { createServer, type Server } from "node:http";
 import { closeDb, createAgent, initDb, upsertSwarmConfig } from "../be/db";
+import { upsertCredentialBinding } from "../be/script-connections";
 import { mintAgentToken, mintScriptRunToken, revokeSessionToken } from "../be/users";
 import { handleConfig } from "../http/config";
 import { handleCore } from "../http/core";
@@ -204,5 +205,79 @@ describe("script run token reads its held secrets on the raw config routes", () 
     const body = await res.text();
     expect(body).not.toContain(WORKER_SECRET);
     expect(body).not.toContain(GLOBAL_SECRET);
+  });
+
+  test("masks confined credential broker and AGENT_FS_API_KEY secrets for script-run tokens across resolved, list, and by-id routes", async () => {
+    const fsSecretVal = `agent-fs-secret-${randomBytes(8).toString("hex")}`;
+    const connSecretVal = `conn-secret-${randomBytes(8).toString("hex")}`;
+    const boundSecretVal = `bound-secret-${randomBytes(8).toString("hex")}`;
+
+    const fsCfg = await upsertSwarmConfig({
+      scope: "global",
+      key: "AGENT_FS_API_KEY",
+      value: fsSecretVal,
+      isSecret: true,
+    });
+    const connCfg = await upsertSwarmConfig({
+      scope: "agent",
+      scopeId: workerId,
+      key: "connection.hubspot.secret",
+      value: connSecretVal,
+      isSecret: true,
+    });
+    const boundCfg = await upsertSwarmConfig({
+      scope: "agent",
+      scopeId: workerId,
+      key: "HUBSPOT_PRIVATE_APP_TOKEN",
+      value: boundSecretVal,
+      isSecret: true,
+    });
+    await upsertCredentialBinding({
+      configKey: "HUBSPOT_PRIVATE_APP_TOKEN",
+      allowedHosts: ["api.hubapi.com"],
+      headerTemplate: "Authorization: Bearer [REDACTED:HUBSPOT_PRIVATE_APP_TOKEN]",
+      scope: "agent",
+      scopeId: workerId,
+    });
+
+    const leadId = (await createAgent({ name: "script-run-lead", isLead: true, status: "idle" }))
+      .id;
+    const workerRun = await mintScriptRunToken(workerId, 60_000);
+    const leadRun = await mintScriptRunToken(leadId, 60_000);
+    try {
+      for (const token of [workerRun.plaintext, leadRun.plaintext]) {
+        const resolvedRes = await fetch(`${baseUrl}/api/config/resolved?includeSecrets=true`, {
+          headers: headers(token),
+        });
+        expect(resolvedRes.status).toBe(200);
+        const resolvedBody = await resolvedRes.text();
+        expect(resolvedBody).not.toContain(fsSecretVal);
+        expect(resolvedBody).not.toContain(connSecretVal);
+        expect(resolvedBody).not.toContain(boundSecretVal);
+
+        const listRes = await fetch(`${baseUrl}/api/config?includeSecrets=true`, {
+          headers: headers(token),
+        });
+        expect(listRes.status).toBe(200);
+        const listBody = await listRes.text();
+        expect(listBody).not.toContain(fsSecretVal);
+        expect(listBody).not.toContain(connSecretVal);
+        expect(listBody).not.toContain(boundSecretVal);
+
+        for (const cfgId of [fsCfg.id, connCfg.id, boundCfg.id]) {
+          const byIdRes = await fetch(`${baseUrl}/api/config/${cfgId}?includeSecrets=true`, {
+            headers: headers(token),
+          });
+          expect(byIdRes.status).toBe(200);
+          const byIdBody = await byIdRes.text();
+          expect(byIdBody).not.toContain(fsSecretVal);
+          expect(byIdBody).not.toContain(connSecretVal);
+          expect(byIdBody).not.toContain(boundSecretVal);
+        }
+      }
+    } finally {
+      await revokeSessionToken(workerRun.tokenId);
+      await revokeSessionToken(leadRun.tokenId);
+    }
   });
 });
