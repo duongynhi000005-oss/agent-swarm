@@ -2072,11 +2072,18 @@ export async function resolveCodexOAuthCredentialInfo(
     try {
       const slots = await loadAllCodexOAuthSlots(apiUrl, apiKey);
       if (slots.length > 0) {
+        const allSlotIndices = slots.map((s) => s.slot);
+        // `api_key_status` records the real slot id (`codex_oauth_<slot>`) as
+        // `keyIndex`, whereas `/api/keys/available` scans `0..totalKeys - 1`.
+        // Use `max(slot) + 1` so sparse pools (e.g. `{0, 2}` after deleting
+        // slot 1, or a single slot at index `1`) include every real slot id,
+        // then intersect with `allSlotIndices` so deleted holes are ignored.
+        const indexCeiling = Math.max(...allSlotIndices) + 1;
         let availableIndices: number[] | undefined;
         let authFailureFence: number | undefined;
         try {
           const resp = await fetch(
-            `${apiUrl}/api/keys/available?keyType=CODEX_OAUTH&totalKeys=${slots.length}`,
+            `${apiUrl}/api/keys/available?keyType=CODEX_OAUTH&totalKeys=${indexCeiling}`,
             { headers: { Authorization: `Bearer ${apiKey}` } },
           );
           if (resp.ok) {
@@ -2086,24 +2093,29 @@ export async function resolveCodexOAuthCredentialInfo(
             };
             availableIndices = data.availableIndices;
             authFailureFence = data.authFailureFence;
-            if (availableIndices.length < slots.length) {
-              console.log(
-                `[credentials] CODEX_OAUTH: ${availableIndices.length}/${slots.length} slots available (${slots.length - availableIndices.length} rate-limited)`,
-              );
-            }
           }
         } catch {
           // Non-critical — fall through to random selection
         }
 
-        const allSlotIndices = slots.map((s) => s.slot);
         let selectedSlot: number;
-        if (availableIndices && availableIndices.length > 0) {
-          const eligible = allSlotIndices.filter((i) => availableIndices!.includes(i));
-          const pool = eligible.length > 0 ? eligible : allSlotIndices;
-          selectedSlot = pool[Math.floor(Math.random() * pool.length)]!;
+        let isRateLimitFallback = false;
+        if (availableIndices !== undefined) {
+          const availableSet = new Set(availableIndices);
+          const eligible = allSlotIndices.filter((i) => availableSet.has(i));
+          if (eligible.length < slots.length) {
+            console.log(
+              `[credentials] CODEX_OAUTH: ${eligible.length}/${slots.length} slots available (${slots.length - eligible.length} rate-limited)`,
+            );
+          }
+          if (eligible.length > 0) {
+            selectedSlot = eligible[Math.floor(Math.random() * eligible.length)]!;
+          } else {
+            isRateLimitFallback = true;
+            selectedSlot = allSlotIndices[Math.floor(Math.random() * allSlotIndices.length)]!;
+          }
         } else {
-          // No availability info or all rate-limited — pick randomly (best effort)
+          // No availability info — pick randomly (best effort)
           selectedSlot = allSlotIndices[Math.floor(Math.random() * allSlotIndices.length)]!;
         }
 
@@ -2120,6 +2132,7 @@ export async function resolveCodexOAuthCredentialInfo(
           });
           const sel = {
             ...authJsonToCredentialSelection(authJson, selectedSlot, slots.length),
+            isRateLimitFallback,
             authFailureFence,
           };
           console.log(

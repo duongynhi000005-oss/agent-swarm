@@ -142,5 +142,133 @@ describe("resolveCodexOAuthCredentialInfo — issue #1102 bug 1", () => {
     expect(info!.isPoolBacked).toBe(true);
     expect(info!.selection.index).toBe(0);
     expect(info!.selection.total).toBe(1);
+    expect(info!.selection.isRateLimitFallback).toBe(false);
+  });
+
+  it("queries totalKeys = max(slot) + 1 for sparse pools ({0, 2}) and selects only the non-rate-limited real slot (#1555)", async () => {
+    const FUTURE = Date.now() + 3_600_000;
+    const creds0 = {
+      access:
+        "header.eyJodHRwczovL2FwaS5vcGVuYWkuY29tL2F1dGgiOnsiY2hhdGdwdF9hY2NvdW50X2lkIjoiYWNjLTifX0=.sig",
+      refresh: "rt_0",
+      expires: FUTURE,
+      accountId: "acc-slot0",
+    };
+    const creds2 = {
+      access:
+        "header.eyJodHRwczovL2FwaS5vcGVuYWkuY29tL2F1dGgiOnsiY2hhdGdwdF9hY2NvdW50X2lkIjoiYWNjLTIifX0=.sig",
+      refresh: "rt_2",
+      expires: FUTURE,
+      accountId: "acc-slot2",
+    };
+    let requestedTotalKeys: string | null = null;
+    globalThis.fetch = (async (url: string | URL | Request) => {
+      const href = typeof url === "string" ? url : url instanceof URL ? url.href : url.url;
+      if (href.includes("/api/config/resolved")) {
+        return new Response(
+          JSON.stringify({
+            configs: [
+              { key: "codex_oauth_0", value: JSON.stringify(creds0) },
+              { key: "codex_oauth_2", value: JSON.stringify(creds2) },
+            ],
+          }),
+          { status: 200, headers: { "Content-Type": "application/json" } },
+        );
+      }
+      if (href.includes("/api/keys/available")) {
+        requestedTotalKeys = new URL(href).searchParams.get("totalKeys");
+        // Slot 0 is rate-limited in api_key_status (keyIndex=0); hole 1 and slot 2 are unblocked.
+        return new Response(JSON.stringify({ availableIndices: [1, 2], authFailureFence: 4 }), {
+          status: 200,
+        });
+      }
+      return new Response("not found", { status: 404 });
+    }) as typeof fetch;
+
+    for (let i = 0; i < 10; i++) {
+      const info = await resolveCodexOAuthCredentialInfo(MOCK_API_URL, MOCK_API_KEY);
+      expect(info).not.toBeNull();
+      expect(info!.isPoolBacked).toBe(true);
+      expect(info!.selection.index).toBe(2);
+      expect(info!.selection.total).toBe(2);
+      expect(info!.selection.isRateLimitFallback).toBe(false);
+    }
+    expect(requestedTotalKeys).toBe("3");
+  });
+
+  it("handles a single non-zero slot ({1}) without falling back (#1555)", async () => {
+    const FUTURE = Date.now() + 3_600_000;
+    const creds1 = {
+      access:
+        "header.eyJodHRwczovL2FwaS5vcGVuYWkuY29tL2F1dGgiOnsiY2hhdGdwdF9hY2NvdW50X2lkIjoiYWNjLTEifX0=.sig",
+      refresh: "rt_1",
+      expires: FUTURE,
+      accountId: "acc-slot1",
+    };
+    let requestedTotalKeys: string | null = null;
+    globalThis.fetch = (async (url: string | URL | Request) => {
+      const href = typeof url === "string" ? url : url instanceof URL ? url.href : url.url;
+      if (href.includes("/api/config/resolved")) {
+        return new Response(
+          JSON.stringify({
+            configs: [{ key: "codex_oauth_1", value: JSON.stringify(creds1) }],
+          }),
+          { status: 200, headers: { "Content-Type": "application/json" } },
+        );
+      }
+      if (href.includes("/api/keys/available")) {
+        requestedTotalKeys = new URL(href).searchParams.get("totalKeys");
+        return new Response(JSON.stringify({ availableIndices: [0, 1] }), { status: 200 });
+      }
+      return new Response("not found", { status: 404 });
+    }) as typeof fetch;
+
+    const info = await resolveCodexOAuthCredentialInfo(MOCK_API_URL, MOCK_API_KEY);
+    expect(requestedTotalKeys).toBe("2");
+    expect(info).not.toBeNull();
+    expect(info!.selection.index).toBe(1);
+    expect(info!.selection.isRateLimitFallback).toBe(false);
+  });
+
+  it("marks isRateLimitFallback = true when all real slots in a sparse pool ({0, 2}) are rate-limited even if hole 1 is in availableIndices (#1555)", async () => {
+    const FUTURE = Date.now() + 3_600_000;
+    const creds0 = {
+      access:
+        "header.eyJodHRwczovL2FwaS5vcGVuYWkuY29tL2F1dGgiOnsiY2hhdGdwdF9hY2NvdW50X2lkIjoiYWNjLTifX0=.sig",
+      refresh: "rt_0",
+      expires: FUTURE,
+      accountId: "acc-slot0",
+    };
+    const creds2 = {
+      access:
+        "header.eyJodHRwczovL2FwaS5vcGVuYWkuY29tL2F1dGgiOnsiY2hhdGdwdF9hY2NvdW50X2lkIjoiYWNjLTIifX0=.sig",
+      refresh: "rt_2",
+      expires: FUTURE,
+      accountId: "acc-slot2",
+    };
+    globalThis.fetch = (async (url: string | URL | Request) => {
+      const href = typeof url === "string" ? url : url instanceof URL ? url.href : url.url;
+      if (href.includes("/api/config/resolved")) {
+        return new Response(
+          JSON.stringify({
+            configs: [
+              { key: "codex_oauth_0", value: JSON.stringify(creds0) },
+              { key: "codex_oauth_2", value: JSON.stringify(creds2) },
+            ],
+          }),
+          { status: 200, headers: { "Content-Type": "application/json" } },
+        );
+      }
+      if (href.includes("/api/keys/available")) {
+        // Both real slots 0 and 2 are rate-limited; only deleted hole 1 is unblocked.
+        return new Response(JSON.stringify({ availableIndices: [1] }), { status: 200 });
+      }
+      return new Response("not found", { status: 404 });
+    }) as typeof fetch;
+
+    const info = await resolveCodexOAuthCredentialInfo(MOCK_API_URL, MOCK_API_KEY);
+    expect(info).not.toBeNull();
+    expect([0, 2]).toContain(info!.selection.index);
+    expect(info!.selection.isRateLimitFallback).toBe(true);
   });
 });
