@@ -9,6 +9,7 @@ export interface SlackThreadSteeringRequest {
   message: string;
   messageTimestamps?: string[];
   requestedByUserId?: string;
+  slackUserId?: string;
 }
 
 export interface SlackThreadSteeringResult {
@@ -52,14 +53,18 @@ export async function requestSlackThreadSteering(
     source: "slack",
     createdByKind: "user",
     createdByUserId: args.requestedByUserId,
+    slackUserId: args.slackUserId,
+    messageTimestamps: args.messageTimestamps,
   });
-  for (const messageTs of args.messageTimestamps ?? []) {
-    await createLogEntry({
-      eventType: "task_steering",
-      taskId: task.id,
-      newValue: "slack_reaction",
-      metadata: { slackChannelId: args.channelId, slackMessageTs: messageTs },
-    });
+  if (result.outcome !== "blocked") {
+    for (const messageTs of args.messageTimestamps ?? []) {
+      await createLogEntry({
+        eventType: "task_steering",
+        taskId: task.id,
+        newValue: "slack_reaction",
+        metadata: { slackChannelId: args.channelId, slackMessageTs: messageTs },
+      });
+    }
   }
 
   return { task, result };
@@ -67,6 +72,9 @@ export async function requestSlackThreadSteering(
 
 /** Build an honest thread acknowledgement for the core service outcome. */
 export function formatSlackSteeringAck(result: SteerResult): string {
+  if (result.outcome === "blocked") {
+    return ":no_entry: _Your steering message was blocked._";
+  }
   if (result.outcome === "promoted") {
     return ":speech_balloon: _Your message was queued as a follow-up task._";
   }

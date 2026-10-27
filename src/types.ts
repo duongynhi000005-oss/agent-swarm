@@ -535,7 +535,7 @@ export const SteeringMessageSchema = z
   .openapi("SteeringMessage");
 export type SteeringMessage = z.infer<typeof SteeringMessageSchema>;
 
-export const SteerOutcomeSchema = z.enum(["steered", "queued", "promoted"]);
+export const SteerOutcomeSchema = z.enum(["steered", "queued", "promoted", "blocked"]);
 export type SteerOutcome = z.infer<typeof SteerOutcomeSchema>;
 
 /** Decision 16 — callers opt into a hard failure instead of a silent downgrade. */
@@ -549,6 +549,8 @@ export const SteerResultSchema = z
     promotedTaskId: z.uuid().optional(),
     effectiveMode: SteerModeSchema,
     degradedFrom: SteerModeSchema.optional(),
+    blockedReason: z.string().optional(),
+    extension: z.object({ id: z.string(), name: z.string() }).optional(),
   })
   .openapi("SteerResult");
 export type SteerResult = z.infer<typeof SteerResultSchema>;

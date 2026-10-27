@@ -2,7 +2,14 @@
 import type { SwarmSdk } from "swarm-sdk";
 import type { z } from "zod";
 import type { RequestInfo } from "../tools/utils";
-import type { ActiveSession, AgentTask, CreateTaskOptions } from "../types";
+import type {
+  ActiveSession,
+  AgentTask,
+  CreateTaskOptions,
+  OnUnsupported,
+  SteeringSource,
+  SteerMode,
+} from "../types";
 
 export type Runtime = "api" | "worker";
 
@@ -196,6 +203,25 @@ export interface TaskFollowUpEvent {
 export type TaskFollowUpModify = Partial<
   Pick<CreateTaskOptions, "agentId" | "priority" | "followUpConfig">
 > & { description?: string };
+
+export interface TaskSteerEvent {
+  task: AgentTask;
+  message: string;
+  mode: SteerMode;
+  onUnsupported: OnUnsupported;
+  source: SteeringSource;
+  sender: {
+    kind: "user" | "agent" | "system";
+    userId?: string;
+    agentId?: string;
+    slackUserId?: string;
+  };
+  messageTimestamps?: string[];
+}
+
+export interface TaskSteerModify {
+  message?: string;
+}
 
 export interface SlackRouteEvent {
   channelId: string;
@@ -421,6 +447,11 @@ export interface SwarmEventMap {
     event: TaskFollowUpEvent;
     modify: TaskFollowUpModify;
     result: PreResult<TaskFollowUpModify>;
+  };
+  "pre.task.steer": {
+    event: TaskSteerEvent;
+    modify: TaskSteerModify;
+    result: PreResult<TaskSteerModify>;
   };
   "pre.slack.route": {
     event: SlackRouteEvent;

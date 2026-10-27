@@ -57,6 +57,7 @@ export async function requestChatThreadSteering(args: {
 
 /** Thread acknowledgement for the steering outcome. Constants, not prompts. */
 export function formatChatSteeringAck(result: SteerResult): string {
+  if (result.outcome === "blocked") return "_Your message was blocked._";
   if (result.outcome === "promoted") return "_Your message was queued as a follow-up task._";
   if (result.degradedFrom) {
     return "_Interrupt steering is unavailable for this task, so your message was queued._";

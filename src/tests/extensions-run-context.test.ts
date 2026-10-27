@@ -99,4 +99,16 @@ describe("runContext", () => {
       { agentId: null, subject: "channel C1: hello" },
     );
   });
+
+  test("task steering records the sender or assignee and a scrubbed message snippet", () => {
+    const context = runContext("pre.task.steer", {
+      task: { id: "task-1", agentId: "agent-2", task: "Run work" },
+      message: `steer token=sk-ant-${"a".repeat(40)}`,
+      source: "slack",
+      sender: { kind: "user", slackUserId: "U1" },
+    });
+    expect(context.agentId).toBe("agent-2");
+    expect(context.subject?.startsWith("task task-1 (slack): ")).toBe(true);
+    expect(context.subject?.includes("sk-ant-")).toBe(false);
+  });
 });
